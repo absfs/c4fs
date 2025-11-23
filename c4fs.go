@@ -18,10 +18,21 @@ import (
 // It uses a copy-on-write architecture with an immutable base manifest
 // and a mutable layer manifest for changes.
 type FS struct {
-	mu    sync.RWMutex
-	base  *c4m.Manifest  // Immutable base (snapshot)
-	layer *c4m.Manifest  // Mutable overlay (starts empty)
-	store *StoreAdapter  // Content storage
+	mu         sync.RWMutex
+	base       *c4m.Manifest           // Immutable base (snapshot)
+	layer      *c4m.Manifest           // Mutable overlay (starts empty)
+	store      *StoreAdapter           // Content storage
+	baseIndex  map[string]*c4m.Entry   // Index for fast base lookups
+	layerIndex map[string]*c4m.Entry   // Index for fast layer lookups
+}
+
+// buildIndex creates a path -> entry index from a manifest for O(1) lookups.
+func buildIndex(manifest *c4m.Manifest) map[string]*c4m.Entry {
+	index := make(map[string]*c4m.Entry, len(manifest.Entries))
+	for _, entry := range manifest.Entries {
+		index[entry.Name] = entry
+	}
+	return index
 }
 
 // New creates a new C4FS filesystem.
@@ -32,9 +43,11 @@ func New(base *c4m.Manifest, store *StoreAdapter) *FS {
 	}
 
 	return &FS{
-		base:  base,
-		layer: c4m.NewManifest(),
-		store: store,
+		base:       base,
+		layer:      c4m.NewManifest(),
+		store:      store,
+		baseIndex:  buildIndex(base),
+		layerIndex: make(map[string]*c4m.Entry),
 	}
 }
 
@@ -48,9 +61,11 @@ func NewWithLayer(base, layer *c4m.Manifest, store *StoreAdapter) *FS {
 	}
 
 	return &FS{
-		base:  base,
-		layer: layer,
-		store: store,
+		base:       base,
+		layer:      layer,
+		store:      store,
+		baseIndex:  buildIndex(base),
+		layerIndex: buildIndex(layer),
 	}
 }
 
@@ -67,8 +82,8 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 		path = ""
 	}
 
-	// Check layer first
-	if entry := c4fs.layer.GetEntry(path); entry != nil {
+	// Check layer first using index for O(1) lookup
+	if entry, exists := c4fs.layerIndex[path]; exists {
 		// Check for tombstone (Size = -1 means deleted)
 		if entry.Size == -1 {
 			return nil, &fs.PathError{
@@ -80,8 +95,8 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 		return entry, nil
 	}
 
-	// Fall back to base
-	if entry := c4fs.base.GetEntry(path); entry != nil {
+	// Fall back to base using index for O(1) lookup
+	if entry, exists := c4fs.baseIndex[path]; exists {
 		return entry, nil
 	}
 
@@ -827,20 +842,27 @@ func (s *subFS) Sub(dir string) (fs.FS, error) {
 
 // updateEntryInLayer adds or updates an entry in the layer manifest.
 // If an entry with the same name exists in the layer, it is removed first.
+// This also updates the layer index for O(1) lookups.
 func (c4fs *FS) updateEntryInLayer(entry *c4m.Entry) {
 	name := entry.Name
 
-	// Remove existing entry with same name from layer (if any)
-	var newEntries []*c4m.Entry
-	for _, e := range c4fs.layer.Entries {
-		if e.Name != name {
-			newEntries = append(newEntries, e)
+	// Check if entry already exists in layer
+	if oldEntry, exists := c4fs.layerIndex[name]; exists {
+		// Remove old entry from manifest (linear scan, but only when updating)
+		for i, e := range c4fs.layer.Entries {
+			if e.Name == name {
+				c4fs.layer.Entries = append(c4fs.layer.Entries[:i], c4fs.layer.Entries[i+1:]...)
+				break
+			}
 		}
+		_ = oldEntry // Suppress unused warning
 	}
-	c4fs.layer.Entries = newEntries
 
-	// Add new entry
+	// Add new entry to manifest
 	c4fs.layer.AddEntry(entry)
+
+	// Update index
+	c4fs.layerIndex[name] = entry
 }
 
 // Chmod changes the mode of the named file in the layer.
@@ -1010,8 +1032,8 @@ func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
 		path = ""
 	}
 
-	// Check layer first
-	if entry := c4fs.layer.GetEntry(path); entry != nil {
+	// Check layer first using index for O(1) lookup
+	if entry, exists := c4fs.layerIndex[path]; exists {
 		// Check for tombstone (Size = -1 means deleted)
 		if entry.Size == -1 {
 			return nil, &fs.PathError{
@@ -1023,8 +1045,8 @@ func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
 		return entry, nil
 	}
 
-	// Fall back to base
-	if entry := c4fs.base.GetEntry(path); entry != nil {
+	// Fall back to base using index for O(1) lookup
+	if entry, exists := c4fs.baseIndex[path]; exists {
 		return entry, nil
 	}
 
