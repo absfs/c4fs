@@ -120,7 +120,7 @@ func (f *dehydratingFile) Close() error {
 	}
 
 	f.c4fs.mu.Lock()
-	f.c4fs.layer.AddEntry(entry)
+	f.c4fs.updateEntryInLayer(entry)
 	f.c4fs.mu.Unlock()
 
 	return nil

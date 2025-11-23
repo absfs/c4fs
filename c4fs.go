@@ -18,14 +18,14 @@ import (
 // and a mutable layer manifest for changes.
 type FS struct {
 	mu    sync.RWMutex
-	base  *c4m.Manifest // Immutable base (snapshot)
-	layer *c4m.Manifest // Mutable overlay (starts empty)
-	store Store         // Content storage
+	base  *c4m.Manifest  // Immutable base (snapshot)
+	layer *c4m.Manifest  // Mutable overlay (starts empty)
+	store *StoreAdapter  // Content storage
 }
 
 // New creates a new C4FS filesystem.
 // If base is nil, an empty manifest is created.
-func New(base *c4m.Manifest, store Store) *FS {
+func New(base *c4m.Manifest, store *StoreAdapter) *FS {
 	if base == nil {
 		base = c4m.NewManifest()
 	}
@@ -38,7 +38,7 @@ func New(base *c4m.Manifest, store Store) *FS {
 }
 
 // NewWithLayer creates a new C4FS filesystem with an existing layer.
-func NewWithLayer(base, layer *c4m.Manifest, store Store) *FS {
+func NewWithLayer(base, layer *c4m.Manifest, store *StoreAdapter) *FS {
 	if base == nil {
 		base = c4m.NewManifest()
 	}
@@ -257,7 +257,7 @@ func (c4fs *FS) ReadFile(name string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// dirFile implements fs.File for directories.
+// dirFile implements fs.File and fs.ReadDirFile for directories.
 type dirFile struct {
 	entries []fs.DirEntry
 	info    *fileInfo
@@ -278,6 +278,31 @@ func (d *dirFile) Read([]byte) (int, error) {
 
 func (d *dirFile) Close() error {
 	return nil
+}
+
+// ReadDir reads the contents of the directory.
+// This implements fs.ReadDirFile for better compatibility.
+func (d *dirFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	if n <= 0 {
+		// Return all remaining entries
+		entries := d.entries[d.pos:]
+		d.pos = len(d.entries)
+		return entries, nil
+	}
+
+	if d.pos >= len(d.entries) {
+		return nil, io.EOF
+	}
+
+	end := d.pos + n
+	if end > len(d.entries) {
+		end = len(d.entries)
+	}
+
+	entries := d.entries[d.pos:end]
+	d.pos = end
+
+	return entries, nil
 }
 
 // Flatten merges the base and layer manifests into a new manifest.
@@ -314,7 +339,7 @@ func (c4fs *FS) Layer() *c4m.Manifest {
 }
 
 // Store returns the underlying content store.
-func (c4fs *FS) Store() Store {
+func (c4fs *FS) Store() *StoreAdapter {
 	return c4fs.store
 }
 
@@ -341,7 +366,7 @@ func (c4fs *FS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	}
 
 	c4fs.mu.Lock()
-	c4fs.layer.AddEntry(entry)
+	c4fs.updateEntryInLayer(entry)
 	c4fs.mu.Unlock()
 
 	return nil
@@ -383,7 +408,7 @@ func (c4fs *FS) Mkdir(name string, perm fs.FileMode) error {
 		Name:      name,
 	}
 
-	c4fs.layer.AddEntry(entry)
+	c4fs.updateEntryInLayer(entry)
 	return nil
 }
 
@@ -424,4 +449,240 @@ func (c4fs *FS) Rename(oldname, newname string) error {
 		Path: oldname,
 		Err:  fmt.Errorf("not implemented"),
 	}
+}
+
+// Sub returns an FS corresponding to the subtree rooted at dir.
+// This implements fs.SubFS for better composability.
+func (c4fs *FS) Sub(dir string) (fs.FS, error) {
+	// Normalize the directory path
+	dir = filepath.Clean(dir)
+	if dir == "." {
+		dir = ""
+	}
+
+	// Check that dir exists and is a directory
+	if dir != "" {
+		entry, err := c4fs.getEntry(dir)
+		if err != nil {
+			return nil, err
+		}
+		if !entry.IsDir() {
+			return nil, &fs.PathError{
+				Op:   "sub",
+				Path: dir,
+				Err:  fmt.Errorf("not a directory"),
+			}
+		}
+	}
+
+	return &subFS{
+		parent: c4fs,
+		prefix: dir,
+	}, nil
+}
+
+// Glob returns the names of all files matching pattern.
+// This implements fs.GlobFS for pattern matching.
+func (c4fs *FS) Glob(pattern string) ([]string, error) {
+	c4fs.mu.RLock()
+	defer c4fs.mu.RUnlock()
+
+	// Collect all file paths from base and layer
+	seen := make(map[string]bool)
+	var allPaths []string
+
+	// Add from layer
+	for _, e := range c4fs.layer.Entries {
+		if !seen[e.Name] {
+			seen[e.Name] = true
+			allPaths = append(allPaths, e.Name)
+		}
+	}
+
+	// Add from base
+	for _, e := range c4fs.base.Entries {
+		if !seen[e.Name] {
+			seen[e.Name] = true
+			allPaths = append(allPaths, e.Name)
+		}
+	}
+
+	// Filter by pattern
+	var matches []string
+	for _, path := range allPaths {
+		matched, err := filepath.Match(pattern, path)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
+			matches = append(matches, path)
+		}
+	}
+
+	return matches, nil
+}
+
+// subFS implements a view into a subdirectory of an FS.
+type subFS struct {
+	parent *FS
+	prefix string
+}
+
+func (s *subFS) Open(name string) (fs.File, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := filepath.Join(s.prefix, name)
+	return s.parent.Open(fullPath)
+}
+
+func (s *subFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := filepath.Join(s.prefix, name)
+	return s.parent.ReadDir(fullPath)
+}
+
+func (s *subFS) ReadFile(name string) ([]byte, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "readfile", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := filepath.Join(s.prefix, name)
+	return s.parent.ReadFile(fullPath)
+}
+
+func (s *subFS) Stat(name string) (fs.FileInfo, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := filepath.Join(s.prefix, name)
+	return s.parent.Stat(fullPath)
+}
+
+func (s *subFS) Glob(pattern string) ([]string, error) {
+	// Get all matches from parent
+	matches, err := s.parent.Glob(filepath.Join(s.prefix, pattern))
+	if err != nil {
+		return nil, err
+	}
+
+	// Strip prefix from matches
+	var result []string
+	for _, match := range matches {
+		rel, err := filepath.Rel(s.prefix, match)
+		if err == nil && !strings.HasPrefix(rel, "..") {
+			result = append(result, rel)
+		}
+	}
+
+	return result, nil
+}
+
+func (s *subFS) Sub(dir string) (fs.FS, error) {
+	if !fs.ValidPath(dir) {
+		return nil, &fs.PathError{Op: "sub", Path: dir, Err: fs.ErrInvalid}
+	}
+	fullPath := filepath.Join(s.prefix, dir)
+	return s.parent.Sub(fullPath)
+}
+
+// updateEntryInLayer adds or updates an entry in the layer manifest.
+// If an entry with the same name exists in the layer, it is removed first.
+func (c4fs *FS) updateEntryInLayer(entry *c4m.Entry) {
+	name := entry.Name
+
+	// Remove existing entry with same name from layer (if any)
+	var newEntries []*c4m.Entry
+	for _, e := range c4fs.layer.Entries {
+		if e.Name != name {
+			newEntries = append(newEntries, e)
+		}
+	}
+	c4fs.layer.Entries = newEntries
+
+	// Add new entry
+	c4fs.layer.AddEntry(entry)
+}
+
+// Chmod changes the mode of the named file in the layer.
+func (c4fs *FS) Chmod(name string, mode fs.FileMode) error {
+	entry, err := c4fs.getEntry(name)
+	if err != nil {
+		return err
+	}
+
+	// Create updated entry in layer with new mode
+	newEntry := &c4m.Entry{
+		Mode:      mode,
+		Timestamp: entry.Timestamp, // Preserve timestamp
+		Size:      entry.Size,
+		Name:      filepath.Clean(name),
+		C4ID:      entry.C4ID,
+		Target:    entry.Target,
+	}
+
+	c4fs.mu.Lock()
+	c4fs.updateEntryInLayer(newEntry)
+	c4fs.mu.Unlock()
+
+	return nil
+}
+
+// Chtimes changes the access and modification times of the named file in the layer.
+func (c4fs *FS) Chtimes(name string, atime, mtime time.Time) error {
+	entry, err := c4fs.getEntry(name)
+	if err != nil {
+		return err
+	}
+
+	// Create updated entry in layer with new timestamp
+	// Note: C4M only stores one timestamp, so we use mtime
+	newEntry := &c4m.Entry{
+		Mode:      entry.Mode,
+		Timestamp: mtime,
+		Size:      entry.Size,
+		Name:      filepath.Clean(name),
+		C4ID:      entry.C4ID,
+		Target:    entry.Target,
+	}
+
+	c4fs.mu.Lock()
+	c4fs.updateEntryInLayer(newEntry)
+	c4fs.mu.Unlock()
+
+	return nil
+}
+
+// Exists checks if a file or directory exists.
+func (c4fs *FS) Exists(name string) bool {
+	_, err := c4fs.getEntry(name)
+	return err == nil
+}
+
+// IsDir checks if the path is a directory.
+func (c4fs *FS) IsDir(name string) bool {
+	entry, err := c4fs.getEntry(name)
+	if err != nil {
+		return false
+	}
+	return entry.IsDir()
+}
+
+// IsFile checks if the path is a regular file.
+func (c4fs *FS) IsFile(name string) bool {
+	entry, err := c4fs.getEntry(name)
+	if err != nil {
+		return false
+	}
+	return !entry.IsDir()
+}
+
+// Size returns the size of the named file.
+func (c4fs *FS) Size(name string) (int64, error) {
+	entry, err := c4fs.getEntry(name)
+	if err != nil {
+		return 0, err
+	}
+	return entry.Size, nil
 }
