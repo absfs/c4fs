@@ -405,6 +405,44 @@ func (c4fs *FS) Store() *StoreAdapter {
 	return c4fs.store
 }
 
+// ReferencedIDs returns a set of all C4 IDs currently referenced by the filesystem.
+// This includes IDs from both the base and layer manifests, excluding tombstones
+// and shadowed entries. The returned map can be used for garbage collection to
+// identify orphaned content.
+func (c4fs *FS) ReferencedIDs() map[c4.ID]bool {
+	c4fs.mu.RLock()
+	defer c4fs.mu.RUnlock()
+
+	refs := make(map[c4.ID]bool)
+
+	// Collect tombstones and shadowed entries from layer
+	tombstones := make(map[string]bool)
+	layerEntries := make(map[string]bool)
+	for _, e := range c4fs.layer.Entries {
+		if e.Size == -1 {
+			tombstones[e.Name] = true
+		} else {
+			layerEntries[e.Name] = true
+		}
+	}
+
+	// Add IDs from base (excluding tombstoned and shadowed entries and directories)
+	for _, e := range c4fs.base.Entries {
+		if !tombstones[e.Name] && !layerEntries[e.Name] && !e.IsDir() && e.Size > 0 {
+			refs[e.C4ID] = true
+		}
+	}
+
+	// Add IDs from layer (excluding tombstones and directories)
+	for _, e := range c4fs.layer.Entries {
+		if e.Size != -1 && !e.IsDir() && e.Size > 0 {
+			refs[e.C4ID] = true
+		}
+	}
+
+	return refs
+}
+
 // WriteFile writes data to the named file, creating it if necessary.
 // This is a dehydration operation: content → C4 ID → layer manifest.
 func (c4fs *FS) WriteFile(name string, data []byte, perm fs.FileMode) error {
