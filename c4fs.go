@@ -93,8 +93,10 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 }
 
 // Stat returns file information for the given path.
+// Unlike Lstat, this follows symbolic links.
 func (c4fs *FS) Stat(name string) (fs.FileInfo, error) {
-	entry, err := c4fs.getEntry(name)
+	// Resolve symlinks (max depth 40, same as Linux)
+	entry, err := c4fs.resolveSymlink(name, 40)
 	if err != nil {
 		return nil, err
 	}
@@ -109,14 +111,17 @@ func (c4fs *FS) Stat(name string) (fs.FileInfo, error) {
 }
 
 // Open opens the named file for reading.
+// This follows symbolic links.
 func (c4fs *FS) Open(name string) (fs.File, error) {
-	entry, err := c4fs.getEntry(name)
+	// Resolve symlinks (max depth 40)
+	entry, err := c4fs.resolveSymlink(name, 40)
 	if err != nil {
 		return nil, err
 	}
 
 	if entry.IsDir() {
-		return c4fs.openDir(name, entry)
+		// For directories, use the resolved path
+		return c4fs.openDir(entry.Name, entry)
 	}
 
 	return c4fs.openFile(name, entry)
@@ -918,4 +923,184 @@ func (c4fs *FS) Size(name string) (int64, error) {
 		return 0, err
 	}
 	return entry.Size, nil
+}
+
+// Symlink creates a symbolic link at name pointing to target.
+func (c4fs *FS) Symlink(target, name string) error {
+	c4fs.mu.Lock()
+	defer c4fs.mu.Unlock()
+
+	name = filepath.Clean(name)
+
+	// Check if already exists
+	if entry := c4fs.layer.GetEntry(name); entry != nil && entry.Size != -1 {
+		return &fs.PathError{
+			Op:   "symlink",
+			Path: name,
+			Err:  fs.ErrExist,
+		}
+	}
+	if entry := c4fs.base.GetEntry(name); entry != nil {
+		return &fs.PathError{
+			Op:   "symlink",
+			Path: name,
+			Err:  fs.ErrExist,
+		}
+	}
+
+	// Create symlink entry
+	entry := &c4m.Entry{
+		Mode:      fs.ModeSymlink | 0777, // Symlinks typically have 0777 permissions
+		Timestamp: time.Now().UTC(),
+		Size:      0,
+		Name:      name,
+		Target:    target,
+		C4ID:      c4.ID{}, // Empty ID for symlinks
+	}
+
+	c4fs.updateEntryInLayer(entry)
+	return nil
+}
+
+// ReadLink reads the target of a symbolic link.
+// It returns the target path without resolving it.
+func (c4fs *FS) ReadLink(name string) (string, error) {
+	// Use lstatEntry to get symlink without following it
+	entry, err := c4fs.lstatEntry(name)
+	if err != nil {
+		return "", err
+	}
+
+	if entry.Mode&fs.ModeSymlink == 0 {
+		return "", &fs.PathError{
+			Op:   "readlink",
+			Path: name,
+			Err:  fmt.Errorf("not a symlink"),
+		}
+	}
+
+	return entry.Target, nil
+}
+
+// Lstat returns file information for the named file without following symlinks.
+// This is like Stat but doesn't follow symbolic links.
+func (c4fs *FS) Lstat(name string) (fs.FileInfo, error) {
+	entry, err := c4fs.lstatEntry(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return &fileInfo{
+		name:    filepath.Base(entry.Name),
+		size:    entry.Size,
+		mode:    entry.Mode,
+		modTime: entry.Timestamp,
+		isDir:   entry.IsDir(),
+	}, nil
+}
+
+// lstatEntry is like getEntry but doesn't follow symlinks.
+func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
+	c4fs.mu.RLock()
+	defer c4fs.mu.RUnlock()
+
+	// Normalize path
+	path = filepath.Clean(path)
+	if path == "." {
+		path = ""
+	}
+
+	// Check layer first
+	if entry := c4fs.layer.GetEntry(path); entry != nil {
+		// Check for tombstone (Size = -1 means deleted)
+		if entry.Size == -1 {
+			return nil, &fs.PathError{
+				Op:   "lstat",
+				Path: path,
+				Err:  fs.ErrNotExist,
+			}
+		}
+		return entry, nil
+	}
+
+	// Fall back to base
+	if entry := c4fs.base.GetEntry(path); entry != nil {
+		return entry, nil
+	}
+
+	return nil, &fs.PathError{
+		Op:   "lstat",
+		Path: path,
+		Err:  fs.ErrNotExist,
+	}
+}
+
+// resolveSymlink resolves a symlink entry to its target entry.
+// It follows symlink chains up to a maximum depth to prevent infinite loops.
+// This also resolves symlinks in the directory path (e.g., "dirlink/file.txt").
+func (c4fs *FS) resolveSymlink(path string, maxDepth int) (*c4m.Entry, error) {
+	if maxDepth <= 0 {
+		return nil, &fs.PathError{
+			Op:   "stat",
+			Path: path,
+			Err:  fmt.Errorf("too many levels of symbolic links"),
+		}
+	}
+
+	// Clean the path
+	path = filepath.Clean(path)
+
+	// Resolve symlinks in each component of the path
+	components := strings.Split(path, "/")
+	resolvedPath := ""
+
+	for i, component := range components {
+		if component == "" || component == "." {
+			continue
+		}
+
+		// Build current path
+		if resolvedPath == "" {
+			resolvedPath = component
+		} else {
+			resolvedPath = filepath.Join(resolvedPath, component)
+		}
+
+		// Check if this component is a symlink
+		entry, err := c4fs.lstatEntry(resolvedPath)
+		if err != nil {
+			// If we can't find an intermediate component, return the error
+			return nil, err
+		}
+
+		// If it's a symlink, resolve it
+		if entry.Mode&fs.ModeSymlink != 0 {
+			target := entry.Target
+
+			// Handle relative vs absolute paths
+			if !filepath.IsAbs(target) {
+				dir := filepath.Dir(resolvedPath)
+				if dir != "." && dir != "" {
+					target = filepath.Join(dir, target)
+				}
+			}
+
+			// If there are more components, append them to the target
+			if i < len(components)-1 {
+				remaining := filepath.Join(components[i+1:]...)
+				target = filepath.Join(target, remaining)
+			}
+
+			// Recursively resolve from the target
+			return c4fs.resolveSymlink(target, maxDepth-1)
+		}
+	}
+
+	// Return the entry at the resolved path
+	entry, err := c4fs.lstatEntry(resolvedPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return entry, nil
 }
