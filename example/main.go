@@ -7,16 +7,19 @@ import (
 
 	"github.com/absfs/c4fs"
 	"github.com/Avalanche-io/c4/c4m"
+	"github.com/Avalanche-io/c4/store"
 )
 
 func main() {
-	// Create a memory-based C4 store
-	store := c4fs.NewMemoryStore()
+	// Create a RAM-based C4 store (from c4/store package)
+	ramStore := store.NewRAM()
+	storeAdapter := c4fs.NewStoreAdapter(ramStore)
 
 	// Create a new C4 filesystem
-	fs := c4fs.New(nil, store)
+	fs := c4fs.New(nil, storeAdapter)
 
-	fmt.Println("=== C4FS Demo ===\n")
+	fmt.Println("=== C4FS Demo ===")
+	fmt.Println()
 
 	// 1. Write files (dehydration)
 	fmt.Println("1. Writing files to C4FS...")
@@ -48,7 +51,7 @@ func main() {
 	}
 
 	fmt.Printf("   ✓ Created file1.txt and file2.txt with same content\n")
-	fmt.Printf("   ✓ Store size: %d (only 3 unique content blocks)\n", store.Size())
+	fmt.Printf("   ✓ Content is automatically deduplicated by C4 ID\n")
 
 	// 3. Read files (hydration)
 	fmt.Println("\n3. Reading files from C4FS...")
@@ -126,7 +129,7 @@ func main() {
 	snapshotData.Close()
 
 	// Create new filesystem from snapshot
-	fs2 := c4fs.New(loadedManifest, store)
+	fs2 := c4fs.New(loadedManifest, storeAdapter)
 
 	// Verify we can read files from restored snapshot
 	data, err = fs2.ReadFile("readme.md")
