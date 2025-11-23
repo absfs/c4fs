@@ -1,4 +1,6 @@
 github.com/Avalanche-io/c4 v0.8.1 h1:ORfaSwha4htPoHhgB6qAI1qwLOWxC/oR6CNfUvemNuQ=
 github.com/Avalanche-io/c4 v0.8.1/go.mod h1:p8cbeFJGUx1eQXQclWCkocf3fx0JXtaUTjEn9mTQZEg=
+github.com/Avalanche-io/c4 v0.8.2-0.20251123060733-2d37ddd07577 h1:FIAB6lP5xigyYjp2w1jxgReaUKcCtfC62Set7PGokBk=
+github.com/Avalanche-io/c4 v0.8.2-0.20251123060733-2d37ddd07577/go.mod h1:ub2If5UOnZxZU4wcgRgbO0GECltXi9Ul22a40kp4GFA=
 github.com/xtgo/set v1.0.0 h1:6BCNBRv3ORNDQ7fyoJXRv+tstJz3m1JVFQErfeZz2pY=
 github.com/xtgo/set v1.0.0/go.mod h1:d3NHzGzSa0NmB2NhFyECA+QdRp29oEn2xbT+TpeFoM8=
