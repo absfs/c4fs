@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"io/fs"
+	"strings"
 	"testing"
 	"time"
 
@@ -798,5 +799,340 @@ func TestC4FSRemoveFromLayer(t *testing.T) {
 	merged := c4fs.Flatten()
 	if merged.GetEntry("base.txt") != nil {
 		t.Error("Flattened manifest should not contain removed file")
+	}
+}
+
+func TestC4FSSymlink(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create a file
+	content := []byte("target file content")
+	c4fs.WriteFile("target.txt", content, 0644)
+
+	// Create symlink to file
+	err := c4fs.Symlink("target.txt", "link.txt")
+	if err != nil {
+		t.Fatalf("Symlink failed: %v", err)
+	}
+
+	// Lstat should show it as a symlink
+	info, err := c4fs.Lstat("link.txt")
+	if err != nil {
+		t.Fatalf("Lstat failed: %v", err)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Error("Lstat should show file as symlink")
+	}
+
+	// Stat should follow the symlink
+	info, err = c4fs.Stat("link.txt")
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		t.Error("Stat should follow symlink and not show symlink mode")
+	}
+	if info.Size() != int64(len(content)) {
+		t.Errorf("Stat via symlink: size = %d, want %d", info.Size(), len(content))
+	}
+
+	// ReadLink should return target
+	target, err := c4fs.ReadLink("link.txt")
+	if err != nil {
+		t.Fatalf("ReadLink failed: %v", err)
+	}
+	if target != "target.txt" {
+		t.Errorf("ReadLink: got %q, want %q", target, "target.txt")
+	}
+
+	// Reading through symlink should work
+	data, err := c4fs.ReadFile("link.txt")
+	if err != nil {
+		t.Fatalf("ReadFile via symlink failed: %v", err)
+	}
+	if !bytes.Equal(data, content) {
+		t.Error("Content read via symlink doesn't match")
+	}
+
+	// Symlink to existing file should fail
+	err = c4fs.Symlink("target.txt", "link.txt")
+	if err == nil {
+		t.Error("Symlink to existing path should fail")
+	}
+}
+
+func TestC4FSSymlinkToDirectory(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create a directory with a file
+	c4fs.Mkdir("dir", 0755)
+	c4fs.WriteFile("dir/file.txt", []byte("content"), 0644)
+
+	// Create symlink to directory
+	err := c4fs.Symlink("dir", "dirlink")
+	if err != nil {
+		t.Fatalf("Symlink to directory failed: %v", err)
+	}
+
+	// Stat should show it as a directory (following symlink)
+	info, err := c4fs.Stat("dirlink")
+	if err != nil {
+		t.Fatalf("Stat dirlink failed: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("Stat should follow symlink to directory")
+	}
+
+	// Reading file through directory symlink
+	data, err := c4fs.ReadFile("dirlink/file.txt")
+	if err != nil {
+		t.Fatalf("ReadFile via directory symlink failed: %v", err)
+	}
+	if string(data) != "content" {
+		t.Error("Content via directory symlink doesn't match")
+	}
+
+	// Lstat on symlink itself
+	info, err = c4fs.Lstat("dirlink")
+	if err != nil {
+		t.Fatalf("Lstat dirlink failed: %v", err)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Error("Lstat should show symlink mode")
+	}
+	if info.IsDir() {
+		t.Error("Lstat on symlink should not show as directory")
+	}
+}
+
+func TestC4FSSymlinkRelative(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create directory structure
+	c4fs.MkdirAll("a/b", 0755)
+	c4fs.WriteFile("a/b/file.txt", []byte("content"), 0644)
+	c4fs.WriteFile("a/other.txt", []byte("other"), 0644)
+
+	// Create relative symlink
+	err := c4fs.Symlink("../other.txt", "a/b/link.txt")
+	if err != nil {
+		t.Fatalf("Relative symlink failed: %v", err)
+	}
+
+	// Read via relative symlink
+	data, err := c4fs.ReadFile("a/b/link.txt")
+	if err != nil {
+		t.Fatalf("ReadFile via relative symlink failed: %v", err)
+	}
+	if string(data) != "other" {
+		t.Errorf("Content via relative symlink: got %q, want %q", string(data), "other")
+	}
+
+	// Stat via relative symlink
+	info, err := c4fs.Stat("a/b/link.txt")
+	if err != nil {
+		t.Fatalf("Stat via relative symlink failed: %v", err)
+	}
+	if info.Size() != 5 {
+		t.Errorf("Size via relative symlink: got %d, want 5", info.Size())
+	}
+}
+
+func TestC4FSSymlinkChain(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create file and chain of symlinks
+	c4fs.WriteFile("file.txt", []byte("content"), 0644)
+	c4fs.Symlink("file.txt", "link1")
+	c4fs.Symlink("link1", "link2")
+	c4fs.Symlink("link2", "link3")
+
+	// Should be able to read through chain
+	data, err := c4fs.ReadFile("link3")
+	if err != nil {
+		t.Fatalf("ReadFile via symlink chain failed: %v", err)
+	}
+	if string(data) != "content" {
+		t.Error("Content via symlink chain doesn't match")
+	}
+
+	// Stat should work
+	info, err := c4fs.Stat("link3")
+	if err != nil {
+		t.Fatalf("Stat via symlink chain failed: %v", err)
+	}
+	if info.Size() != 7 {
+		t.Errorf("Size via symlink chain: got %d, want 7", info.Size())
+	}
+
+	// Each link should be identifiable via Lstat
+	for _, link := range []string{"link1", "link2", "link3"} {
+		info, err := c4fs.Lstat(link)
+		if err != nil {
+			t.Fatalf("Lstat %s failed: %v", link, err)
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			t.Errorf("%s should be a symlink", link)
+		}
+	}
+}
+
+func TestC4FSSymlinkBroken(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create symlink to non-existent file
+	err := c4fs.Symlink("nonexistent.txt", "broken.txt")
+	if err != nil {
+		t.Fatalf("Creating broken symlink failed: %v", err)
+	}
+
+	// Lstat should work
+	info, err := c4fs.Lstat("broken.txt")
+	if err != nil {
+		t.Fatalf("Lstat on broken symlink failed: %v", err)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Error("Should be a symlink")
+	}
+
+	// ReadLink should work
+	target, err := c4fs.ReadLink("broken.txt")
+	if err != nil {
+		t.Fatalf("ReadLink on broken symlink failed: %v", err)
+	}
+	if target != "nonexistent.txt" {
+		t.Errorf("ReadLink: got %q, want %q", target, "nonexistent.txt")
+	}
+
+	// But Stat and ReadFile should fail
+	_, err = c4fs.Stat("broken.txt")
+	if err == nil {
+		t.Error("Stat on broken symlink should fail")
+	}
+
+	_, err = c4fs.ReadFile("broken.txt")
+	if err == nil {
+		t.Error("ReadFile on broken symlink should fail")
+	}
+}
+
+func TestC4FSSymlinkLoop(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create symlink loop
+	c4fs.Symlink("link2", "link1")
+	c4fs.Symlink("link1", "link2")
+
+	// Stat should detect loop
+	_, err := c4fs.Stat("link1")
+	if err == nil {
+		t.Error("Stat should fail on symlink loop")
+	}
+	if !strings.Contains(err.Error(), "too many levels") {
+		t.Errorf("Error should mention too many levels: %v", err)
+	}
+
+	// ReadFile should fail
+	_, err = c4fs.ReadFile("link1")
+	if err == nil {
+		t.Error("ReadFile should fail on symlink loop")
+	}
+}
+
+func TestC4FSSymlinkRemove(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create file and symlink
+	c4fs.WriteFile("file.txt", []byte("content"), 0644)
+	c4fs.Symlink("file.txt", "link.txt")
+
+	// Remove symlink (not the target)
+	err := c4fs.Remove("link.txt")
+	if err != nil {
+		t.Fatalf("Remove symlink failed: %v", err)
+	}
+
+	// Symlink should be gone
+	if c4fs.Exists("link.txt") {
+		t.Error("Symlink should not exist after removal")
+	}
+
+	// But target should still exist
+	if !c4fs.Exists("file.txt") {
+		t.Error("Target file should still exist")
+	}
+
+	data, err := c4fs.ReadFile("file.txt")
+	if err != nil {
+		t.Fatalf("Reading target after symlink removal failed: %v", err)
+	}
+	if string(data) != "content" {
+		t.Error("Target content changed after symlink removal")
+	}
+}
+
+func TestC4FSSymlinkRename(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create file and symlink
+	c4fs.WriteFile("file.txt", []byte("content"), 0644)
+	c4fs.Symlink("file.txt", "link1.txt")
+
+	// Rename symlink
+	err := c4fs.Rename("link1.txt", "link2.txt")
+	if err != nil {
+		t.Fatalf("Rename symlink failed: %v", err)
+	}
+
+	// Old symlink should be gone
+	if c4fs.Exists("link1.txt") {
+		t.Error("Old symlink should not exist")
+	}
+
+	// New symlink should exist and work
+	target, err := c4fs.ReadLink("link2.txt")
+	if err != nil {
+		t.Fatalf("ReadLink after rename failed: %v", err)
+	}
+	if target != "file.txt" {
+		t.Errorf("Target after rename: got %q, want %q", target, "file.txt")
+	}
+
+	// Should be able to read through renamed symlink
+	data, err := c4fs.ReadFile("link2.txt")
+	if err != nil {
+		t.Fatalf("ReadFile via renamed symlink failed: %v", err)
+	}
+	if string(data) != "content" {
+		t.Error("Content via renamed symlink doesn't match")
+	}
+}
+
+func TestC4FSReadLinkOnNonSymlink(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create regular file
+	c4fs.WriteFile("file.txt", []byte("content"), 0644)
+
+	// ReadLink on non-symlink should fail
+	_, err := c4fs.ReadLink("file.txt")
+	if err == nil {
+		t.Error("ReadLink on regular file should fail")
+	}
+
+	// ReadLink on directory should fail
+	c4fs.Mkdir("dir", 0755)
+	_, err = c4fs.ReadLink("dir")
+	if err == nil {
+		t.Error("ReadLink on directory should fail")
 	}
 }
