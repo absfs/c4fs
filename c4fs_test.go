@@ -314,14 +314,6 @@ func TestC4FSMkdir(t *testing.T) {
 	}
 }
 
-// Helper function to check if error is a PathError with ErrNotExist
-func isPathErrorWithNotExist(err error) bool {
-	if pathErr, ok := err.(*fs.PathError); ok {
-		return pathErr.Err == fs.ErrNotExist
-	}
-	return false
-}
-
 func TestC4FSGlob(t *testing.T) {
 	adapter := NewStoreAdapter(store.NewRAM())
 	c4fs := New(nil, adapter)
@@ -562,5 +554,249 @@ func TestC4FSChtimes(t *testing.T) {
 	// Verify time changed
 	if info2.ModTime().Equal(initialTime) {
 		t.Error("ModTime should have changed")
+	}
+}
+
+func TestC4FSMkdirAll(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create nested directory structure
+	err := c4fs.MkdirAll("a/b/c/d", 0755)
+	if err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	// Verify all directories were created
+	for _, dir := range []string{"a", "a/b", "a/b/c", "a/b/c/d"} {
+		if !c4fs.IsDir(dir) {
+			t.Errorf("Directory %s should exist", dir)
+		}
+	}
+
+	// MkdirAll on existing directory should succeed
+	err = c4fs.MkdirAll("a/b/c", 0755)
+	if err != nil {
+		t.Errorf("MkdirAll on existing directory should succeed: %v", err)
+	}
+
+	// Create a file
+	c4fs.WriteFile("file.txt", []byte("test"), 0644)
+
+	// MkdirAll on existing file should fail
+	err = c4fs.MkdirAll("file.txt", 0755)
+	if err == nil {
+		t.Error("MkdirAll on existing file should fail")
+	}
+}
+
+func TestC4FSRemove(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create and remove a file
+	c4fs.WriteFile("test.txt", []byte("content"), 0644)
+	if !c4fs.Exists("test.txt") {
+		t.Fatal("File should exist after creation")
+	}
+
+	err := c4fs.Remove("test.txt")
+	if err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+
+	if c4fs.Exists("test.txt") {
+		t.Error("File should not exist after removal")
+	}
+
+	// Create and remove an empty directory
+	c4fs.Mkdir("emptydir", 0755)
+	err = c4fs.Remove("emptydir")
+	if err != nil {
+		t.Fatalf("Remove empty directory failed: %v", err)
+	}
+
+	if c4fs.Exists("emptydir") {
+		t.Error("Directory should not exist after removal")
+	}
+
+	// Try to remove non-empty directory (should fail)
+	c4fs.Mkdir("nonempty", 0755)
+	c4fs.WriteFile("nonempty/file.txt", []byte("data"), 0644)
+
+	err = c4fs.Remove("nonempty")
+	if err == nil {
+		t.Error("Remove should fail for non-empty directory")
+	}
+
+	// Remove non-existent file should fail
+	err = c4fs.Remove("nonexistent.txt")
+	if err == nil {
+		t.Error("Remove should fail for non-existent file")
+	}
+}
+
+func TestC4FSRemoveAll(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create nested structure
+	c4fs.MkdirAll("dir/subdir1", 0755)
+	c4fs.MkdirAll("dir/subdir2", 0755)
+	c4fs.WriteFile("dir/file1.txt", []byte("data1"), 0644)
+	c4fs.WriteFile("dir/subdir1/file2.txt", []byte("data2"), 0644)
+	c4fs.WriteFile("dir/subdir2/file3.txt", []byte("data3"), 0644)
+
+	// Remove entire tree
+	err := c4fs.RemoveAll("dir")
+	if err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	// Verify all removed
+	if c4fs.Exists("dir") {
+		t.Error("dir should not exist after RemoveAll")
+	}
+	if c4fs.Exists("dir/subdir1") {
+		t.Error("dir/subdir1 should not exist after RemoveAll")
+	}
+	if c4fs.Exists("dir/file1.txt") {
+		t.Error("dir/file1.txt should not exist after RemoveAll")
+	}
+
+	// RemoveAll on non-existent path should succeed
+	err = c4fs.RemoveAll("nonexistent")
+	if err != nil {
+		t.Errorf("RemoveAll on non-existent path should succeed: %v", err)
+	}
+
+	// RemoveAll on file should work too
+	c4fs.WriteFile("single.txt", []byte("data"), 0644)
+	err = c4fs.RemoveAll("single.txt")
+	if err != nil {
+		t.Fatalf("RemoveAll on file failed: %v", err)
+	}
+	if c4fs.Exists("single.txt") {
+		t.Error("single.txt should not exist after RemoveAll")
+	}
+}
+
+func TestC4FSRename(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Test file rename
+	content := []byte("test content")
+	c4fs.WriteFile("old.txt", content, 0644)
+
+	err := c4fs.Rename("old.txt", "new.txt")
+	if err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+
+	// Old file should not exist
+	if c4fs.Exists("old.txt") {
+		t.Error("old.txt should not exist after rename")
+	}
+
+	// New file should exist with same content
+	if !c4fs.Exists("new.txt") {
+		t.Fatal("new.txt should exist after rename")
+	}
+
+	data, err := c4fs.ReadFile("new.txt")
+	if err != nil {
+		t.Fatalf("Reading renamed file failed: %v", err)
+	}
+	if !bytes.Equal(data, content) {
+		t.Error("Renamed file content mismatch")
+	}
+
+	// Test directory rename
+	c4fs.MkdirAll("olddir/subdir", 0755)
+	c4fs.WriteFile("olddir/file.txt", []byte("data"), 0644)
+	c4fs.WriteFile("olddir/subdir/file2.txt", []byte("data2"), 0644)
+
+	err = c4fs.Rename("olddir", "newdir")
+	if err != nil {
+		t.Fatalf("Directory rename failed: %v", err)
+	}
+
+	// Old paths should not exist
+	if c4fs.Exists("olddir") {
+		t.Error("olddir should not exist after rename")
+	}
+	if c4fs.Exists("olddir/file.txt") {
+		t.Error("olddir/file.txt should not exist after rename")
+	}
+
+	// New paths should exist
+	if !c4fs.Exists("newdir") {
+		t.Error("newdir should exist after rename")
+	}
+	if !c4fs.Exists("newdir/file.txt") {
+		t.Error("newdir/file.txt should exist after rename")
+	}
+	if !c4fs.Exists("newdir/subdir/file2.txt") {
+		t.Error("newdir/subdir/file2.txt should exist after rename")
+	}
+
+	// Verify content preserved
+	data, _ = c4fs.ReadFile("newdir/file.txt")
+	if string(data) != "data" {
+		t.Error("Content not preserved in renamed directory")
+	}
+
+	// Rename to existing file should fail
+	c4fs.WriteFile("existing.txt", []byte("exists"), 0644)
+	err = c4fs.Rename("new.txt", "existing.txt")
+	if err == nil {
+		t.Error("Rename to existing file should fail")
+	}
+
+	// Rename non-existent should fail
+	err = c4fs.Rename("nonexistent.txt", "whatever.txt")
+	if err == nil {
+		t.Error("Rename of non-existent file should fail")
+	}
+}
+
+func TestC4FSRemoveFromLayer(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+
+	// Create base with a file
+	base := c4m.NewManifest()
+	content := []byte("base content")
+	id, _ := adapter.Put(bytes.NewReader(content))
+	base.AddEntry(&c4m.Entry{
+		Mode: 0644,
+		Size: int64(len(content)),
+		Name: "base.txt",
+		C4ID: id,
+	})
+
+	// Create filesystem with base
+	c4fs := New(base, adapter)
+
+	// Verify file exists
+	if !c4fs.Exists("base.txt") {
+		t.Fatal("base.txt should exist")
+	}
+
+	// Remove file from base (adds tombstone to layer)
+	err := c4fs.Remove("base.txt")
+	if err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+
+	// File should not be visible
+	if c4fs.Exists("base.txt") {
+		t.Error("base.txt should not exist after removal")
+	}
+
+	// Flatten should not include the removed file
+	merged := c4fs.Flatten()
+	if merged.GetEntry("base.txt") != nil {
+		t.Error("Flattened manifest should not contain removed file")
 	}
 }
