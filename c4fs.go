@@ -78,8 +78,19 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 
 	// Normalize path
 	path = filepath.Clean(path)
-	if path == "." {
+	if path == "." || path == "/" {
 		path = ""
+	}
+
+	// Special case: root directory always exists as a virtual directory
+	if path == "" {
+		return &c4m.Entry{
+			Mode:      fs.ModeDir | 0755,
+			Timestamp: time.Now().UTC(),
+			Size:      0,
+			Name:      "",
+			C4ID:      c4.ID{},
+		}, nil
 	}
 
 	// Check layer first using index for O(1) lookup
@@ -197,7 +208,7 @@ func (c4fs *FS) readDir(name string) ([]fs.DirEntry, error) {
 
 	// Normalize path
 	name = filepath.Clean(name)
-	if name == "." {
+	if name == "." || name == "/" {
 		name = ""
 	}
 
@@ -257,7 +268,7 @@ func (c4fs *FS) isDirectChild(parentPath, childPath string) bool {
 	parentPath = filepath.Clean(parentPath)
 	childPath = filepath.Clean(childPath)
 
-	if parentPath == "." {
+	if parentPath == "." || parentPath == "/" {
 		parentPath = ""
 	}
 
@@ -434,6 +445,18 @@ func (c4fs *FS) Mkdir(name string, perm fs.FileMode) error {
 	defer c4fs.mu.Unlock()
 
 	name = filepath.Clean(name)
+	if name == "." || name == "/" {
+		name = ""
+	}
+
+	// Cannot create root directory
+	if name == "" {
+		return &fs.PathError{
+			Op:   "mkdir",
+			Path: name,
+			Err:  fs.ErrExist,
+		}
+	}
 
 	// Check if already exists
 	if entry := c4fs.layer.GetEntry(name); entry != nil {
@@ -496,6 +519,18 @@ func (c4fs *FS) MkdirAll(name string, perm fs.FileMode) error {
 // In a copy-on-write filesystem, this adds a tombstone marker to the layer.
 func (c4fs *FS) Remove(name string) error {
 	name = filepath.Clean(name)
+	if name == "." || name == "/" {
+		name = ""
+	}
+
+	// Cannot remove root directory
+	if name == "" {
+		return &fs.PathError{
+			Op:   "remove",
+			Path: name,
+			Err:  fmt.Errorf("cannot remove root directory"),
+		}
+	}
 
 	// Check if file exists
 	entry, err := c4fs.getEntry(name)
@@ -596,6 +631,21 @@ func isPathErrorWithNotExist(err error) bool {
 func (c4fs *FS) Rename(oldname, newname string) error {
 	oldname = filepath.Clean(oldname)
 	newname = filepath.Clean(newname)
+	if oldname == "." || oldname == "/" {
+		oldname = ""
+	}
+	if newname == "." || newname == "/" {
+		newname = ""
+	}
+
+	// Cannot rename root directory
+	if oldname == "" || newname == "" {
+		return &fs.PathError{
+			Op:   "rename",
+			Path: oldname,
+			Err:  fmt.Errorf("cannot rename root directory"),
+		}
+	}
 
 	// Check source exists
 	oldEntry, err := c4fs.getEntry(oldname)
@@ -704,7 +754,7 @@ func (c4fs *FS) Rename(oldname, newname string) error {
 func (c4fs *FS) Sub(dir string) (fs.FS, error) {
 	// Normalize the directory path
 	dir = filepath.Clean(dir)
-	if dir == "." {
+	if dir == "." || dir == "/" {
 		dir = ""
 	}
 
@@ -1028,8 +1078,19 @@ func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
 
 	// Normalize path
 	path = filepath.Clean(path)
-	if path == "." {
+	if path == "." || path == "/" {
 		path = ""
+	}
+
+	// Special case: root directory always exists as a virtual directory
+	if path == "" {
+		return &c4m.Entry{
+			Mode:      fs.ModeDir | 0755,
+			Timestamp: time.Now().UTC(),
+			Size:      0,
+			Name:      "",
+			C4ID:      c4.ID{},
+		}, nil
 	}
 
 	// Check layer first using index for O(1) lookup
