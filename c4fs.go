@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,19 +13,26 @@ import (
 
 	"github.com/Avalanche-io/c4"
 	"github.com/Avalanche-io/c4/c4m"
+	"github.com/absfs/absfs"
 )
 
 // FS implements a content-addressable filesystem using C4 IDs.
 // It uses a copy-on-write architecture with an immutable base manifest
 // and a mutable layer manifest for changes.
+//
+// FS implements the absfs.FileSystem interface.
 type FS struct {
 	mu         sync.RWMutex
-	base       *c4m.Manifest           // Immutable base (snapshot)
-	layer      *c4m.Manifest           // Mutable overlay (starts empty)
-	store      *StoreAdapter           // Content storage
-	baseIndex  map[string]*c4m.Entry   // Index for fast base lookups
-	layerIndex map[string]*c4m.Entry   // Index for fast layer lookups
+	base       *c4m.Manifest         // Immutable base (snapshot)
+	layer      *c4m.Manifest         // Mutable overlay (starts empty)
+	store      *StoreAdapter         // Content storage
+	baseIndex  map[string]*c4m.Entry // Index for fast base lookups
+	layerIndex map[string]*c4m.Entry // Index for fast layer lookups
+	cwd        string                // Current working directory (virtual)
 }
+
+// Compile-time interface assertion
+var _ absfs.FileSystem = (*FS)(nil)
 
 // buildIndex creates a path -> entry index from a manifest for O(1) lookups.
 func buildIndex(manifest *c4m.Manifest) map[string]*c4m.Entry {
@@ -48,6 +56,7 @@ func New(base *c4m.Manifest, store *StoreAdapter) *FS {
 		store:      store,
 		baseIndex:  buildIndex(base),
 		layerIndex: make(map[string]*c4m.Entry),
+		cwd:        "/",
 	}
 }
 
@@ -66,6 +75,7 @@ func NewWithLayer(base, layer *c4m.Manifest, store *StoreAdapter) *FS {
 		store:      store,
 		baseIndex:  buildIndex(base),
 		layerIndex: buildIndex(layer),
+		cwd:        "/",
 	}
 }
 
@@ -81,6 +91,8 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 	if path == "." || path == "/" {
 		path = ""
 	}
+	// Strip leading slash for internal storage
+	path = strings.TrimPrefix(path, "/")
 
 	// Special case: root directory always exists as a virtual directory
 	if path == "" {
@@ -120,7 +132,10 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 
 // Stat returns file information for the given path.
 // Unlike Lstat, this follows symbolic links.
+// This implements the absfs.Filer interface.
 func (c4fs *FS) Stat(name string) (fs.FileInfo, error) {
+	name = c4fs.resolvePath(name)
+
 	// Resolve symlinks (max depth 40, same as Linux)
 	entry, err := c4fs.resolveSymlink(name, 40)
 	if err != nil {
@@ -138,7 +153,10 @@ func (c4fs *FS) Stat(name string) (fs.FileInfo, error) {
 
 // Open opens the named file for reading.
 // This follows symbolic links.
-func (c4fs *FS) Open(name string) (fs.File, error) {
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) Open(name string) (absfs.File, error) {
+	name = c4fs.resolvePath(name)
+
 	// Resolve symlinks (max depth 40)
 	entry, err := c4fs.resolveSymlink(name, 40)
 	if err != nil {
@@ -147,10 +165,10 @@ func (c4fs *FS) Open(name string) (fs.File, error) {
 
 	if entry.IsDir() {
 		// For directories, use the resolved path
-		return c4fs.openDir(entry.Name, entry)
+		return c4fs.openDirFile(entry.Name, entry)
 	}
 
-	return c4fs.openFile(name, entry)
+	return c4fs.openReadOnlyFile(name, entry)
 }
 
 // openFile opens a regular file for reading (hydration).
@@ -290,6 +308,7 @@ func (c4fs *FS) isDirectChild(parentPath, childPath string) bool {
 // ReadDir reads the directory named by dirname and returns
 // a list of directory entries.
 func (c4fs *FS) ReadDir(name string) ([]fs.DirEntry, error) {
+	name = c4fs.resolvePath(name)
 	return c4fs.readDir(name)
 }
 
@@ -446,6 +465,8 @@ func (c4fs *FS) ReferencedIDs() map[c4.ID]bool {
 // WriteFile writes data to the named file, creating it if necessary.
 // This is a dehydration operation: content → C4 ID → layer manifest.
 func (c4fs *FS) WriteFile(name string, data []byte, perm fs.FileMode) error {
+	name = c4fs.resolvePath(name)
+
 	// Dehydrate content to store
 	id, err := c4fs.store.Put(bytes.NewReader(data))
 	if err != nil {
@@ -461,7 +482,7 @@ func (c4fs *FS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 		Mode:      perm,
 		Timestamp: time.Now().UTC(),
 		Size:      int64(len(data)),
-		Name:      filepath.Clean(name),
+		Name:      name,
 		C4ID:      id,
 	}
 
@@ -473,12 +494,17 @@ func (c4fs *FS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 }
 
 // Create creates a file for writing.
-func (c4fs *FS) Create(name string) (File, error) {
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) Create(name string) (absfs.File, error) {
+	name = c4fs.resolvePath(name)
 	return newDehydratingFile(c4fs, name, 0644)
 }
 
 // Mkdir creates a new directory.
+// This implements the absfs.Filer interface.
 func (c4fs *FS) Mkdir(name string, perm fs.FileMode) error {
+	name = c4fs.resolvePath(name)
+
 	c4fs.mu.Lock()
 	defer c4fs.mu.Unlock()
 
@@ -525,7 +551,9 @@ func (c4fs *FS) Mkdir(name string, perm fs.FileMode) error {
 }
 
 // MkdirAll creates a directory and all necessary parents.
+// This implements the absfs.FileSystem interface.
 func (c4fs *FS) MkdirAll(name string, perm fs.FileMode) error {
+	name = c4fs.resolvePath(name)
 	name = filepath.Clean(name)
 
 	// If already exists, check if it's a directory
@@ -555,7 +583,9 @@ func (c4fs *FS) MkdirAll(name string, perm fs.FileMode) error {
 
 // Remove removes the named file or empty directory.
 // In a copy-on-write filesystem, this adds a tombstone marker to the layer.
+// This implements the absfs.Filer interface.
 func (c4fs *FS) Remove(name string) error {
+	name = c4fs.resolvePath(name)
 	name = filepath.Clean(name)
 	if name == "." || name == "/" {
 		name = ""
@@ -610,7 +640,9 @@ func (c4fs *FS) Remove(name string) error {
 
 // RemoveAll removes a path and any children it contains.
 // For directories, it recursively removes all contents.
+// This implements the absfs.FileSystem interface.
 func (c4fs *FS) RemoveAll(name string) error {
+	name = c4fs.resolvePath(name)
 	name = filepath.Clean(name)
 
 	// Check if exists
@@ -666,7 +698,10 @@ func isPathErrorWithNotExist(err error) bool {
 
 // Rename renames (moves) oldpath to newpath.
 // For directories, all children are recursively renamed.
+// This implements the absfs.Filer interface.
 func (c4fs *FS) Rename(oldname, newname string) error {
+	oldname = c4fs.resolvePath(oldname)
+	newname = c4fs.resolvePath(newname)
 	oldname = filepath.Clean(oldname)
 	newname = filepath.Clean(newname)
 	if oldname == "." || oldname == "/" {
@@ -954,7 +989,9 @@ func (c4fs *FS) updateEntryInLayer(entry *c4m.Entry) {
 }
 
 // Chmod changes the mode of the named file in the layer.
+// This implements the absfs.Filer interface.
 func (c4fs *FS) Chmod(name string, mode fs.FileMode) error {
+	name = c4fs.resolvePath(name)
 	entry, err := c4fs.getEntry(name)
 	if err != nil {
 		return err
@@ -978,7 +1015,9 @@ func (c4fs *FS) Chmod(name string, mode fs.FileMode) error {
 }
 
 // Chtimes changes the access and modification times of the named file in the layer.
+// This implements the absfs.Filer interface.
 func (c4fs *FS) Chtimes(name string, atime, mtime time.Time) error {
+	name = c4fs.resolvePath(name)
 	entry, err := c4fs.getEntry(name)
 	if err != nil {
 		return err
@@ -1004,12 +1043,14 @@ func (c4fs *FS) Chtimes(name string, atime, mtime time.Time) error {
 
 // Exists checks if a file or directory exists.
 func (c4fs *FS) Exists(name string) bool {
+	name = c4fs.resolvePath(name)
 	_, err := c4fs.getEntry(name)
 	return err == nil
 }
 
 // IsDir checks if the path is a directory.
 func (c4fs *FS) IsDir(name string) bool {
+	name = c4fs.resolvePath(name)
 	entry, err := c4fs.getEntry(name)
 	if err != nil {
 		return false
@@ -1019,6 +1060,7 @@ func (c4fs *FS) IsDir(name string) bool {
 
 // IsFile checks if the path is a regular file.
 func (c4fs *FS) IsFile(name string) bool {
+	name = c4fs.resolvePath(name)
 	entry, err := c4fs.getEntry(name)
 	if err != nil {
 		return false
@@ -1028,6 +1070,7 @@ func (c4fs *FS) IsFile(name string) bool {
 
 // Size returns the size of the named file.
 func (c4fs *FS) Size(name string) (int64, error) {
+	name = c4fs.resolvePath(name)
 	entry, err := c4fs.getEntry(name)
 	if err != nil {
 		return 0, err
@@ -1037,6 +1080,8 @@ func (c4fs *FS) Size(name string) (int64, error) {
 
 // Symlink creates a symbolic link at name pointing to target.
 func (c4fs *FS) Symlink(target, name string) error {
+	name = c4fs.resolvePath(name)
+
 	c4fs.mu.Lock()
 	defer c4fs.mu.Unlock()
 
@@ -1075,6 +1120,7 @@ func (c4fs *FS) Symlink(target, name string) error {
 // ReadLink reads the target of a symbolic link.
 // It returns the target path without resolving it.
 func (c4fs *FS) ReadLink(name string) (string, error) {
+	name = c4fs.resolvePath(name)
 	// Use lstatEntry to get symlink without following it
 	entry, err := c4fs.lstatEntry(name)
 	if err != nil {
@@ -1095,6 +1141,7 @@ func (c4fs *FS) ReadLink(name string) (string, error) {
 // Lstat returns file information for the named file without following symlinks.
 // This is like Stat but doesn't follow symbolic links.
 func (c4fs *FS) Lstat(name string) (fs.FileInfo, error) {
+	name = c4fs.resolvePath(name)
 	entry, err := c4fs.lstatEntry(name)
 	if err != nil {
 		return nil, err
@@ -1224,4 +1271,475 @@ func (c4fs *FS) resolveSymlink(path string, maxDepth int) (*c4m.Entry, error) {
 	}
 
 	return entry, nil
+}
+
+// resolvePath resolves a path relative to the current working directory.
+// If the path is absolute (starts with /), it is returned cleaned.
+// Otherwise, it is joined with the cwd.
+// Returns the path suitable for internal storage (without leading slash).
+func (c4fs *FS) resolvePath(name string) string {
+	var resolved string
+	if filepath.IsAbs(name) || (len(name) > 0 && name[0] == '/') {
+		resolved = filepath.Clean(name)
+	} else {
+		resolved = filepath.Clean(filepath.Join(c4fs.cwd, name))
+	}
+	// Strip leading slash for internal storage consistency
+	resolved = strings.TrimPrefix(resolved, "/")
+	if resolved == "." {
+		resolved = ""
+	}
+	return resolved
+}
+
+// OpenFile opens a file with the specified flags and permissions.
+// This implements the absfs.Filer interface.
+func (c4fs *FS) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
+	name = c4fs.resolvePath(name)
+
+	// Normalize path
+	name = filepath.Clean(name)
+	if name == "." || name == "/" {
+		name = ""
+	}
+
+	// Check if file exists
+	entry, err := c4fs.getEntry(name)
+	exists := err == nil
+
+	// Handle O_EXCL - fail if file exists
+	if flag&os.O_EXCL != 0 && flag&os.O_CREATE != 0 && exists {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  fs.ErrExist,
+		}
+	}
+
+	// Handle read-only mode
+	if flag&(os.O_WRONLY|os.O_RDWR) == 0 {
+		// O_RDONLY
+		if !exists {
+			return nil, &fs.PathError{
+				Op:   "open",
+				Path: name,
+				Err:  fs.ErrNotExist,
+			}
+		}
+		// Open for reading - return appropriate file type
+		if entry.IsDir() {
+			return c4fs.openDirFile(name, entry)
+		}
+		return c4fs.openReadOnlyFile(name, entry)
+	}
+
+	// Writing mode (O_WRONLY or O_RDWR)
+	if !exists && flag&os.O_CREATE == 0 {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  fs.ErrNotExist,
+		}
+	}
+
+	// Cannot write to directories
+	if exists && entry.IsDir() {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  fmt.Errorf("is a directory"),
+		}
+	}
+
+	// Create new dehydrating file for writing
+	df, err := newDehydratingFile(c4fs, name, fs.FileMode(perm))
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle O_APPEND - read existing content first
+	if flag&os.O_APPEND != 0 && exists {
+		data, err := c4fs.ReadFile(name)
+		if err != nil {
+			return nil, err
+		}
+		df.buf.Write(data)
+		df.pos = int64(len(data))
+	}
+
+	// Handle O_TRUNC - already empty buffer, nothing to do
+
+	return df, nil
+}
+
+// openReadOnlyFile opens a regular file for reading with absfs.File support.
+func (c4fs *FS) openReadOnlyFile(name string, entry *c4m.Entry) (absfs.File, error) {
+	// Get content from store
+	rc, err := c4fs.store.Get(entry.C4ID)
+	if err != nil {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  fmt.Errorf("failed to hydrate content: %w", err),
+		}
+	}
+
+	// Read all content into memory for seeking support
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  fmt.Errorf("failed to read content: %w", err),
+		}
+	}
+
+	info := &fileInfo{
+		name:    filepath.Base(entry.Name),
+		size:    entry.Size,
+		mode:    entry.Mode,
+		modTime: entry.Timestamp,
+		isDir:   false,
+	}
+
+	return &absfsFile{
+		name: name,
+		data: data,
+		info: info,
+		pos:  0,
+	}, nil
+}
+
+// openDirFile opens a directory with absfs.File support.
+func (c4fs *FS) openDirFile(name string, entry *c4m.Entry) (absfs.File, error) {
+	entries, err := c4fs.readDir(name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to os.FileInfo slice
+	var infos []os.FileInfo
+	for _, e := range entries {
+		info, _ := e.Info()
+		infos = append(infos, info)
+	}
+
+	// Convert to names slice
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+
+	info := &fileInfo{
+		name:    filepath.Base(name),
+		size:    entry.Size,
+		mode:    entry.Mode | fs.ModeDir,
+		modTime: entry.Timestamp,
+		isDir:   true,
+	}
+
+	return &absfsDir{
+		name:       name,
+		info:       info,
+		entries:    infos,
+		dirEntries: entries,
+		names:      names,
+		pos:        0,
+	}, nil
+}
+
+// Separator returns the path separator for this filesystem.
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) Separator() uint8 {
+	return '/'
+}
+
+// ListSeparator returns the list separator for this filesystem.
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) ListSeparator() uint8 {
+	return ':'
+}
+
+// Chdir changes the current working directory.
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) Chdir(dir string) error {
+	c4fs.mu.Lock()
+	defer c4fs.mu.Unlock()
+
+	// Resolve path
+	if !filepath.IsAbs(dir) && dir[0] != '/' {
+		dir = filepath.Clean(filepath.Join(c4fs.cwd, dir))
+	} else {
+		dir = filepath.Clean(dir)
+	}
+
+	// Unlock temporarily for getEntry (which takes RLock)
+	c4fs.mu.Unlock()
+	entry, err := c4fs.getEntry(dir)
+	c4fs.mu.Lock()
+	if err != nil {
+		return &os.PathError{Op: "chdir", Path: dir, Err: fs.ErrNotExist}
+	}
+
+	if !entry.IsDir() {
+		return &os.PathError{Op: "chdir", Path: dir, Err: fmt.Errorf("not a directory")}
+	}
+
+	if dir == "" {
+		dir = "/"
+	}
+	c4fs.cwd = dir
+	return nil
+}
+
+// Getwd returns the current working directory.
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) Getwd() (string, error) {
+	c4fs.mu.RLock()
+	defer c4fs.mu.RUnlock()
+	return c4fs.cwd, nil
+}
+
+// TempDir returns a default directory for temporary files.
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) TempDir() string {
+	return "/tmp"
+}
+
+// Truncate changes the size of the named file.
+// This implements the absfs.FileSystem interface.
+func (c4fs *FS) Truncate(name string, size int64) error {
+	name = c4fs.resolvePath(name)
+
+	entry, err := c4fs.getEntry(name)
+	if err != nil {
+		return err
+	}
+
+	if entry.IsDir() {
+		return &fs.PathError{
+			Op:   "truncate",
+			Path: name,
+			Err:  fmt.Errorf("is a directory"),
+		}
+	}
+
+	// Read existing content
+	data, err := c4fs.ReadFile(name)
+	if err != nil {
+		return err
+	}
+
+	// Truncate or extend the data
+	var newData []byte
+	if size <= 0 {
+		newData = []byte{}
+	} else if size < int64(len(data)) {
+		newData = data[:size]
+	} else if size > int64(len(data)) {
+		// Extend with zero bytes
+		newData = make([]byte, size)
+		copy(newData, data)
+	} else {
+		// Same size, nothing to do
+		return nil
+	}
+
+	// Write back the truncated data
+	return c4fs.WriteFile(name, newData, entry.Mode)
+}
+
+// Chown changes the numeric uid and gid of the named file.
+// For c4fs, this is a no-op since we don't track ownership.
+// This implements the absfs.Filer interface.
+func (c4fs *FS) Chown(name string, uid, gid int) error {
+	name = c4fs.resolvePath(name)
+
+	// Verify the file exists
+	_, err := c4fs.getEntry(name)
+	return err
+}
+
+// absfsFile implements absfs.File for regular files.
+type absfsFile struct {
+	name string
+	data []byte
+	info *fileInfo
+	pos  int64
+}
+
+func (f *absfsFile) Name() string               { return f.name }
+func (f *absfsFile) Stat() (os.FileInfo, error) { return f.info, nil }
+func (f *absfsFile) Sync() error                { return nil }
+func (f *absfsFile) Close() error               { return nil }
+
+func (f *absfsFile) Read(p []byte) (int, error) {
+	if f.pos >= int64(len(f.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[f.pos:])
+	f.pos += int64(n)
+	return n, nil
+}
+
+func (f *absfsFile) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(f.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (f *absfsFile) Seek(offset int64, whence int) (int64, error) {
+	var newPos int64
+	switch whence {
+	case io.SeekStart:
+		newPos = offset
+	case io.SeekCurrent:
+		newPos = f.pos + offset
+	case io.SeekEnd:
+		newPos = int64(len(f.data)) + offset
+	default:
+		return 0, fmt.Errorf("invalid whence")
+	}
+	if newPos < 0 {
+		return 0, fmt.Errorf("negative position")
+	}
+	f.pos = newPos
+	return f.pos, nil
+}
+
+func (f *absfsFile) Write(p []byte) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: f.name, Err: fmt.Errorf("file opened for reading")}
+}
+
+func (f *absfsFile) WriteAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: f.name, Err: fmt.Errorf("file opened for reading")}
+}
+
+func (f *absfsFile) WriteString(s string) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: f.name, Err: fmt.Errorf("file opened for reading")}
+}
+
+func (f *absfsFile) Truncate(size int64) error {
+	return &fs.PathError{Op: "truncate", Path: f.name, Err: fmt.Errorf("file opened for reading")}
+}
+
+func (f *absfsFile) Readdir(n int) ([]os.FileInfo, error) {
+	return nil, &fs.PathError{Op: "readdir", Path: f.name, Err: fmt.Errorf("not a directory")}
+}
+
+func (f *absfsFile) Readdirnames(n int) ([]string, error) {
+	return nil, &fs.PathError{Op: "readdirnames", Path: f.name, Err: fmt.Errorf("not a directory")}
+}
+
+// absfsDir implements absfs.File for directories.
+type absfsDir struct {
+	name       string
+	info       *fileInfo
+	entries    []os.FileInfo
+	dirEntries []fs.DirEntry
+	names      []string
+	pos        int
+}
+
+func (d *absfsDir) Name() string               { return d.name }
+func (d *absfsDir) Stat() (os.FileInfo, error) { return d.info, nil }
+func (d *absfsDir) Sync() error                { return nil }
+func (d *absfsDir) Close() error               { return nil }
+
+func (d *absfsDir) Read(p []byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: fmt.Errorf("is a directory")}
+}
+
+func (d *absfsDir) ReadAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: fmt.Errorf("is a directory")}
+}
+
+func (d *absfsDir) Seek(offset int64, whence int) (int64, error) {
+	return 0, &fs.PathError{Op: "seek", Path: d.name, Err: fmt.Errorf("is a directory")}
+}
+
+func (d *absfsDir) Write(p []byte) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: d.name, Err: fmt.Errorf("is a directory")}
+}
+
+func (d *absfsDir) WriteAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: d.name, Err: fmt.Errorf("is a directory")}
+}
+
+func (d *absfsDir) WriteString(s string) (int, error) {
+	return 0, &fs.PathError{Op: "write", Path: d.name, Err: fmt.Errorf("is a directory")}
+}
+
+func (d *absfsDir) Truncate(size int64) error {
+	return &fs.PathError{Op: "truncate", Path: d.name, Err: fmt.Errorf("is a directory")}
+}
+
+func (d *absfsDir) Readdir(n int) ([]os.FileInfo, error) {
+	if n <= 0 {
+		entries := d.entries[d.pos:]
+		d.pos = len(d.entries)
+		return entries, nil
+	}
+
+	if d.pos >= len(d.entries) {
+		return nil, io.EOF
+	}
+
+	end := d.pos + n
+	if end > len(d.entries) {
+		end = len(d.entries)
+	}
+
+	entries := d.entries[d.pos:end]
+	d.pos = end
+	return entries, nil
+}
+
+func (d *absfsDir) Readdirnames(n int) ([]string, error) {
+	if n <= 0 {
+		names := d.names[d.pos:]
+		d.pos = len(d.names)
+		return names, nil
+	}
+
+	if d.pos >= len(d.names) {
+		return nil, io.EOF
+	}
+
+	end := d.pos + n
+	if end > len(d.names) {
+		end = len(d.names)
+	}
+
+	names := d.names[d.pos:end]
+	d.pos = end
+	return names, nil
+}
+
+// ReadDir implements fs.ReadDirFile for directory iteration.
+func (d *absfsDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	if n <= 0 {
+		entries := d.dirEntries[d.pos:]
+		d.pos = len(d.dirEntries)
+		return entries, nil
+	}
+
+	if d.pos >= len(d.dirEntries) {
+		return nil, io.EOF
+	}
+
+	end := d.pos + n
+	if end > len(d.dirEntries) {
+		end = len(d.dirEntries)
+	}
+
+	entries := d.dirEntries[d.pos:end]
+	d.pos = end
+	return entries, nil
 }

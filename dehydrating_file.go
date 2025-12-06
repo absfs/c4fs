@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -124,4 +125,57 @@ func (f *dehydratingFile) Close() error {
 	f.c4fs.mu.Unlock()
 
 	return nil
+}
+
+// Name returns the name of the file.
+func (f *dehydratingFile) Name() string {
+	return f.name
+}
+
+// ReadAt is not supported for write-only files.
+func (f *dehydratingFile) ReadAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "read",
+		Path: f.name,
+		Err:  fmt.Errorf("file opened for writing"),
+	}
+}
+
+// Truncate changes the size of the buffered content.
+func (f *dehydratingFile) Truncate(size int64) error {
+	if size < 0 {
+		return &fs.PathError{
+			Op:   "truncate",
+			Path: f.name,
+			Err:  fmt.Errorf("negative size"),
+		}
+	}
+
+	data := f.buf.Bytes()
+	if size < int64(len(data)) {
+		f.buf = bytes.NewBuffer(data[:size])
+	} else if size > int64(len(data)) {
+		// Extend with zeros
+		extra := make([]byte, size-int64(len(data)))
+		f.buf.Write(extra)
+	}
+	return nil
+}
+
+// Readdir is not supported for regular files.
+func (f *dehydratingFile) Readdir(n int) ([]os.FileInfo, error) {
+	return nil, &fs.PathError{
+		Op:   "readdir",
+		Path: f.name,
+		Err:  fmt.Errorf("not a directory"),
+	}
+}
+
+// Readdirnames is not supported for regular files.
+func (f *dehydratingFile) Readdirnames(n int) ([]string, error) {
+	return nil, &fs.PathError{
+		Op:   "readdirnames",
+		Path: f.name,
+		Err:  fmt.Errorf("not a directory"),
+	}
 }

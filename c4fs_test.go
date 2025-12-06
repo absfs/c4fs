@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"io"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Avalanche-io/c4/c4m"
 	"github.com/Avalanche-io/c4/store"
+	"github.com/absfs/absfs"
 )
 
 func TestStoreAdapter(t *testing.T) {
@@ -441,15 +443,10 @@ func TestC4FSInterfaceCompliance(t *testing.T) {
 	adapter := NewStoreAdapter(store.NewRAM())
 	c4fs := New(nil, adapter)
 
-	// Verify c4fs implements standard interfaces
-	var _ fs.FS = c4fs
-	var _ fs.ReadDirFS = c4fs
-	var _ fs.ReadFileFS = c4fs
-	var _ fs.StatFS = c4fs
-	var _ fs.GlobFS = c4fs
-	var _ fs.SubFS = c4fs
+	// Verify c4fs implements absfs.FileSystem interface
+	var _ absfs.FileSystem = c4fs
 
-	t.Log("FS implements all standard fs interfaces")
+	t.Log("FS implements absfs.FileSystem interface")
 }
 
 func TestC4FSUtilityMethods(t *testing.T) {
@@ -1134,5 +1131,805 @@ func TestC4FSReadLinkOnNonSymlink(t *testing.T) {
 	_, err = c4fs.ReadLink("dir")
 	if err == nil {
 		t.Error("ReadLink on directory should fail")
+	}
+}
+
+// Tests for absfs.FileSystem interface methods
+
+func TestC4FSSeparator(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	if sep := c4fs.Separator(); sep != '/' {
+		t.Errorf("Separator: got %c, want /", sep)
+	}
+}
+
+func TestC4FSListSeparator(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	if sep := c4fs.ListSeparator(); sep != ':' {
+		t.Errorf("ListSeparator: got %c, want :", sep)
+	}
+}
+
+func TestC4FSTempDir(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	if dir := c4fs.TempDir(); dir != "/tmp" {
+		t.Errorf("TempDir: got %q, want /tmp", dir)
+	}
+}
+
+func TestC4FSChdir(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Initial cwd should be "/"
+	cwd, err := c4fs.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd failed: %v", err)
+	}
+	if cwd != "/" {
+		t.Errorf("Initial cwd: got %q, want /", cwd)
+	}
+
+	// Create a directory
+	if err := c4fs.Mkdir("testdir", 0755); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+
+	// Chdir to it
+	if err := c4fs.Chdir("testdir"); err != nil {
+		t.Fatalf("Chdir failed: %v", err)
+	}
+
+	// Verify cwd changed
+	cwd, err = c4fs.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd after Chdir failed: %v", err)
+	}
+	if cwd != "testdir" && cwd != "/testdir" {
+		t.Errorf("Cwd after Chdir: got %q, want testdir or /testdir", cwd)
+	}
+
+	// Chdir to non-existent directory should fail
+	if err := c4fs.Chdir("nonexistent"); err == nil {
+		t.Error("Chdir to non-existent directory should fail")
+	}
+
+	// Create a file
+	c4fs.WriteFile("file.txt", []byte("content"), 0644)
+
+	// Chdir to file should fail
+	if err := c4fs.Chdir("file.txt"); err == nil {
+		t.Error("Chdir to file should fail")
+	}
+
+	// Chdir to root
+	if err := c4fs.Chdir("/"); err != nil {
+		t.Fatalf("Chdir to root failed: %v", err)
+	}
+	cwd, _ = c4fs.Getwd()
+	if cwd != "/" {
+		t.Errorf("Cwd after Chdir /: got %q, want /", cwd)
+	}
+}
+
+func TestC4FSChdirRelativePaths(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create nested directories
+	c4fs.MkdirAll("a/b/c", 0755)
+
+	// Chdir to a
+	c4fs.Chdir("a")
+
+	// Create file using relative path
+	c4fs.WriteFile("file.txt", []byte("content"), 0644)
+
+	// File should be at a/file.txt (use absolute path to check)
+	if !c4fs.Exists("/a/file.txt") {
+		t.Error("File should exist at /a/file.txt")
+	}
+
+	// Read file using relative path (from cwd=a, file.txt means a/file.txt)
+	data, err := c4fs.ReadFile("file.txt")
+	if err != nil {
+		t.Fatalf("ReadFile with relative path failed: %v", err)
+	}
+	if string(data) != "content" {
+		t.Errorf("Content: got %q, want content", string(data))
+	}
+
+	// Chdir to b using relative path
+	c4fs.Chdir("b")
+
+	// Verify cwd
+	cwd, _ := c4fs.Getwd()
+	if cwd != "a/b" && cwd != "/a/b" {
+		t.Errorf("Cwd: got %q, want a/b", cwd)
+	}
+}
+
+func TestC4FSTruncate(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create a file
+	content := []byte("Hello, World!")
+	c4fs.WriteFile("test.txt", content, 0644)
+
+	// Truncate to smaller size
+	err := c4fs.Truncate("test.txt", 5)
+	if err != nil {
+		t.Fatalf("Truncate to smaller size failed: %v", err)
+	}
+
+	data, _ := c4fs.ReadFile("test.txt")
+	if string(data) != "Hello" {
+		t.Errorf("After truncate to 5: got %q, want Hello", string(data))
+	}
+
+	// Truncate to zero
+	err = c4fs.Truncate("test.txt", 0)
+	if err != nil {
+		t.Fatalf("Truncate to zero failed: %v", err)
+	}
+
+	data, _ = c4fs.ReadFile("test.txt")
+	if len(data) != 0 {
+		t.Errorf("After truncate to 0: got length %d, want 0", len(data))
+	}
+
+	// Write new content and truncate to larger size
+	c4fs.WriteFile("test.txt", []byte("Hi"), 0644)
+	err = c4fs.Truncate("test.txt", 10)
+	if err != nil {
+		t.Fatalf("Truncate to larger size failed: %v", err)
+	}
+
+	data, _ = c4fs.ReadFile("test.txt")
+	if len(data) != 10 {
+		t.Errorf("After truncate to 10: got length %d, want 10", len(data))
+	}
+	if string(data[:2]) != "Hi" {
+		t.Errorf("After truncate to 10: first 2 bytes should be Hi, got %q", string(data[:2]))
+	}
+	// Extended bytes should be zeros
+	for i := 2; i < 10; i++ {
+		if data[i] != 0 {
+			t.Errorf("Extended byte %d should be zero, got %d", i, data[i])
+		}
+	}
+
+	// Truncate non-existent file should fail
+	err = c4fs.Truncate("nonexistent.txt", 5)
+	if err == nil {
+		t.Error("Truncate non-existent file should fail")
+	}
+
+	// Truncate directory should fail
+	c4fs.Mkdir("dir", 0755)
+	err = c4fs.Truncate("dir", 5)
+	if err == nil {
+		t.Error("Truncate directory should fail")
+	}
+}
+
+func TestC4FSChown(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create a file
+	c4fs.WriteFile("test.txt", []byte("content"), 0644)
+
+	// Chown should succeed (no-op)
+	err := c4fs.Chown("test.txt", 1000, 1000)
+	if err != nil {
+		t.Errorf("Chown failed: %v", err)
+	}
+
+	// Chown on directory
+	c4fs.Mkdir("dir", 0755)
+	err = c4fs.Chown("dir", 1000, 1000)
+	if err != nil {
+		t.Errorf("Chown on directory failed: %v", err)
+	}
+
+	// Chown on non-existent file should fail
+	err = c4fs.Chown("nonexistent.txt", 1000, 1000)
+	if err == nil {
+		t.Error("Chown on non-existent file should fail")
+	}
+}
+
+func TestC4FSOpenFile(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// O_RDONLY on non-existent file should fail
+	_, err := c4fs.OpenFile("nonexistent.txt", os.O_RDONLY, 0644)
+	if err == nil {
+		t.Error("OpenFile O_RDONLY on non-existent should fail")
+	}
+
+	// Create a file
+	c4fs.WriteFile("test.txt", []byte("hello"), 0644)
+
+	// O_RDONLY should work
+	f, err := c4fs.OpenFile("test.txt", os.O_RDONLY, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile O_RDONLY failed: %v", err)
+	}
+	data := make([]byte, 5)
+	n, _ := f.Read(data)
+	f.Close()
+	if string(data[:n]) != "hello" {
+		t.Errorf("Read via OpenFile: got %q, want hello", string(data[:n]))
+	}
+
+	// O_WRONLY on non-existent without O_CREATE should fail
+	_, err = c4fs.OpenFile("new.txt", os.O_WRONLY, 0644)
+	if err == nil {
+		t.Error("OpenFile O_WRONLY without O_CREATE on non-existent should fail")
+	}
+
+	// O_WRONLY|O_CREATE should work
+	f, err = c4fs.OpenFile("new.txt", os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile O_WRONLY|O_CREATE failed: %v", err)
+	}
+	f.Write([]byte("world"))
+	f.Close()
+
+	data2, _ := c4fs.ReadFile("new.txt")
+	if string(data2) != "world" {
+		t.Errorf("After O_WRONLY|O_CREATE: got %q, want world", string(data2))
+	}
+
+	// O_CREATE|O_EXCL on existing file should fail
+	_, err = c4fs.OpenFile("test.txt", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err == nil {
+		t.Error("OpenFile O_CREATE|O_EXCL on existing should fail")
+	}
+
+	// O_WRONLY on directory should fail
+	c4fs.Mkdir("dir", 0755)
+	_, err = c4fs.OpenFile("dir", os.O_WRONLY, 0644)
+	if err == nil {
+		t.Error("OpenFile O_WRONLY on directory should fail")
+	}
+}
+
+func TestC4FSOpenFileAppend(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create initial file
+	c4fs.WriteFile("test.txt", []byte("hello"), 0644)
+
+	// Open with O_APPEND
+	f, err := c4fs.OpenFile("test.txt", os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile O_APPEND failed: %v", err)
+	}
+	f.Write([]byte(" world"))
+	f.Close()
+
+	data, _ := c4fs.ReadFile("test.txt")
+	if string(data) != "hello world" {
+		t.Errorf("After O_APPEND: got %q, want 'hello world'", string(data))
+	}
+}
+
+func TestC4FSOpenFileDirectory(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create directory with files
+	c4fs.MkdirAll("testdir", 0755)
+	c4fs.WriteFile("testdir/file1.txt", []byte("a"), 0644)
+	c4fs.WriteFile("testdir/file2.txt", []byte("b"), 0644)
+
+	// Open directory for reading
+	f, err := c4fs.OpenFile("testdir", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile on directory failed: %v", err)
+	}
+
+	// Should be able to get stat
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat on directory file failed: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("Directory should have IsDir() = true")
+	}
+
+	// Should implement fs.ReadDirFile
+	if rdf, ok := f.(fs.ReadDirFile); ok {
+		entries, err := rdf.ReadDir(-1)
+		if err != nil {
+			t.Fatalf("ReadDir failed: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("ReadDir: got %d entries, want 2", len(entries))
+		}
+	} else {
+		t.Error("Directory file should implement fs.ReadDirFile")
+	}
+
+	f.Close()
+}
+
+func TestC4FSFileSeek(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create file
+	c4fs.WriteFile("test.txt", []byte("0123456789"), 0644)
+
+	// Open for reading
+	f, _ := c4fs.OpenFile("test.txt", os.O_RDONLY, 0)
+	defer f.Close()
+
+	// Seek to position 5
+	pos, err := f.Seek(5, io.SeekStart)
+	if err != nil {
+		t.Fatalf("Seek failed: %v", err)
+	}
+	if pos != 5 {
+		t.Errorf("Seek position: got %d, want 5", pos)
+	}
+
+	// Read from position 5
+	data := make([]byte, 3)
+	f.Read(data)
+	if string(data) != "567" {
+		t.Errorf("Read after seek: got %q, want 567", string(data))
+	}
+
+	// Seek relative to current
+	pos, _ = f.Seek(-2, io.SeekCurrent)
+	if pos != 6 {
+		t.Errorf("Seek relative: got %d, want 6", pos)
+	}
+
+	// Seek relative to end
+	pos, _ = f.Seek(-3, io.SeekEnd)
+	if pos != 7 {
+		t.Errorf("Seek from end: got %d, want 7", pos)
+	}
+}
+
+func TestC4FSFileReadAt(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create file
+	c4fs.WriteFile("test.txt", []byte("0123456789"), 0644)
+
+	// Open for reading
+	f, _ := c4fs.OpenFile("test.txt", os.O_RDONLY, 0)
+	defer f.Close()
+
+	// ReadAt
+	data := make([]byte, 3)
+	n, err := f.ReadAt(data, 5)
+	if err != nil {
+		t.Fatalf("ReadAt failed: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("ReadAt n: got %d, want 3", n)
+	}
+	if string(data) != "567" {
+		t.Errorf("ReadAt data: got %q, want 567", string(data))
+	}
+
+	// ReadAt past end should return io.EOF
+	_, err = f.ReadAt(data, 10)
+	if err != io.EOF {
+		t.Errorf("ReadAt past end: got %v, want io.EOF", err)
+	}
+}
+
+func TestC4FSNewWithLayer(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+
+	// Create base with a file
+	base := c4m.NewManifest()
+	content := []byte("base content")
+	id, _ := adapter.Put(bytes.NewReader(content))
+	base.AddEntry(&c4m.Entry{
+		Mode: 0644,
+		Size: int64(len(content)),
+		Name: "base.txt",
+		C4ID: id,
+	})
+
+	// Create layer with a file
+	layer := c4m.NewManifest()
+	layerContent := []byte("layer content")
+	layerId, _ := adapter.Put(bytes.NewReader(layerContent))
+	layer.AddEntry(&c4m.Entry{
+		Mode: 0644,
+		Size: int64(len(layerContent)),
+		Name: "layer.txt",
+		C4ID: layerId,
+	})
+
+	// Create filesystem with both
+	c4fs := NewWithLayer(base, layer, adapter)
+
+	// Both files should exist
+	if !c4fs.Exists("base.txt") {
+		t.Error("base.txt should exist")
+	}
+	if !c4fs.Exists("layer.txt") {
+		t.Error("layer.txt should exist")
+	}
+
+	// Read base file
+	data, err := c4fs.ReadFile("base.txt")
+	if err != nil {
+		t.Fatalf("ReadFile base.txt failed: %v", err)
+	}
+	if string(data) != "base content" {
+		t.Errorf("base.txt content: got %q, want 'base content'", string(data))
+	}
+
+	// Read layer file
+	data, err = c4fs.ReadFile("layer.txt")
+	if err != nil {
+		t.Fatalf("ReadFile layer.txt failed: %v", err)
+	}
+	if string(data) != "layer content" {
+		t.Errorf("layer.txt content: got %q, want 'layer content'", string(data))
+	}
+}
+
+func TestC4FSBaseLayerStore(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Write a file
+	c4fs.WriteFile("test.txt", []byte("content"), 0644)
+
+	// Base should return a copy
+	base := c4fs.Base()
+	if base == nil {
+		t.Error("Base should not be nil")
+	}
+
+	// Layer should contain the new file
+	layer := c4fs.Layer()
+	if layer == nil {
+		t.Error("Layer should not be nil")
+	}
+	if layer.GetEntry("test.txt") == nil {
+		t.Error("Layer should contain test.txt")
+	}
+
+	// Store should be accessible
+	store := c4fs.Store()
+	if store == nil {
+		t.Error("Store should not be nil")
+	}
+}
+
+func TestC4FSSubFS(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create directory structure
+	c4fs.MkdirAll("docs/api", 0755)
+	c4fs.WriteFile("docs/readme.txt", []byte("readme"), 0644)
+	c4fs.WriteFile("docs/api/endpoints.txt", []byte("endpoints"), 0644)
+
+	// Get sub filesystem
+	sub, err := c4fs.Sub("docs")
+	if err != nil {
+		t.Fatalf("Sub failed: %v", err)
+	}
+
+	// Open file through sub fs
+	f, err := sub.Open("readme.txt")
+	if err != nil {
+		t.Fatalf("Open via sub failed: %v", err)
+	}
+	defer f.Close()
+
+	// Read content
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("Read via sub failed: %v", err)
+	}
+	if string(data) != "readme" {
+		t.Errorf("Content via sub: got %q, want readme", string(data))
+	}
+
+	// Sub of non-directory should fail
+	_, err = c4fs.Sub("docs/readme.txt")
+	if err == nil {
+		t.Error("Sub of file should fail")
+	}
+}
+
+func TestC4FSDehydratingFileOperations(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create a file
+	f, err := c4fs.Create("test.txt")
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Name should return the file name
+	if name := f.Name(); name != "test.txt" {
+		t.Errorf("Name: got %q, want test.txt", name)
+	}
+
+	// WriteString
+	n, err := f.WriteString("hello")
+	if err != nil {
+		t.Fatalf("WriteString failed: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("WriteString n: got %d, want 5", n)
+	}
+
+	// Stat should work before close
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	if info.Size() != 5 {
+		t.Errorf("Stat size: got %d, want 5", info.Size())
+	}
+
+	// Read on write file should fail
+	buf := make([]byte, 5)
+	_, err = f.Read(buf)
+	if err == nil {
+		t.Error("Read on write file should fail")
+	}
+
+	// ReadAt on write file should fail
+	_, err = f.ReadAt(buf, 0)
+	if err == nil {
+		t.Error("ReadAt on write file should fail")
+	}
+
+	// Readdir on file should fail
+	_, err = f.Readdir(-1)
+	if err == nil {
+		t.Error("Readdir on file should fail")
+	}
+
+	// Readdirnames on file should fail
+	_, err = f.Readdirnames(-1)
+	if err == nil {
+		t.Error("Readdirnames on file should fail")
+	}
+
+	// Sync should succeed
+	if err := f.Sync(); err != nil {
+		t.Errorf("Sync failed: %v", err)
+	}
+
+	// Close
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Verify content
+	data, _ := c4fs.ReadFile("test.txt")
+	if string(data) != "hello" {
+		t.Errorf("Content: got %q, want hello", string(data))
+	}
+}
+
+func TestC4FSReadOnlyFileErrorPaths(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create and open file
+	c4fs.WriteFile("test.txt", []byte("content"), 0644)
+	f, _ := c4fs.OpenFile("test.txt", os.O_RDONLY, 0)
+	defer f.Close()
+
+	// Write should fail
+	_, err := f.Write([]byte("data"))
+	if err == nil {
+		t.Error("Write on read-only file should fail")
+	}
+
+	// WriteAt should fail
+	_, err = f.WriteAt([]byte("data"), 0)
+	if err == nil {
+		t.Error("WriteAt on read-only file should fail")
+	}
+
+	// WriteString should fail
+	_, err = f.WriteString("data")
+	if err == nil {
+		t.Error("WriteString on read-only file should fail")
+	}
+
+	// Truncate should fail
+	err = f.Truncate(0)
+	if err == nil {
+		t.Error("Truncate on read-only file should fail")
+	}
+
+	// Readdir should fail (not a directory)
+	_, err = f.Readdir(-1)
+	if err == nil {
+		t.Error("Readdir on file should fail")
+	}
+
+	// Readdirnames should fail (not a directory)
+	_, err = f.Readdirnames(-1)
+	if err == nil {
+		t.Error("Readdirnames on file should fail")
+	}
+}
+
+func TestC4FSDirFileOperations(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create directory with files
+	c4fs.MkdirAll("testdir", 0755)
+	c4fs.WriteFile("testdir/file1.txt", []byte("a"), 0644)
+	c4fs.WriteFile("testdir/file2.txt", []byte("b"), 0644)
+
+	// Open directory
+	f, _ := c4fs.OpenFile("testdir", os.O_RDONLY, 0)
+	defer f.Close()
+
+	// Read should fail
+	buf := make([]byte, 10)
+	_, err := f.Read(buf)
+	if err == nil {
+		t.Error("Read on directory should fail")
+	}
+
+	// ReadAt should fail
+	_, err = f.ReadAt(buf, 0)
+	if err == nil {
+		t.Error("ReadAt on directory should fail")
+	}
+
+	// Seek should fail
+	_, err = f.Seek(0, io.SeekStart)
+	if err == nil {
+		t.Error("Seek on directory should fail")
+	}
+
+	// Write should fail
+	_, err = f.Write([]byte("data"))
+	if err == nil {
+		t.Error("Write on directory should fail")
+	}
+
+	// WriteAt should fail
+	_, err = f.WriteAt([]byte("data"), 0)
+	if err == nil {
+		t.Error("WriteAt on directory should fail")
+	}
+
+	// WriteString should fail
+	_, err = f.WriteString("data")
+	if err == nil {
+		t.Error("WriteString on directory should fail")
+	}
+
+	// Truncate should fail
+	err = f.Truncate(0)
+	if err == nil {
+		t.Error("Truncate on directory should fail")
+	}
+
+	// Sync should succeed
+	if err := f.Sync(); err != nil {
+		t.Errorf("Sync on directory failed: %v", err)
+	}
+
+	// Readdir with n=1
+	entries, err := f.Readdir(1)
+	if err != nil {
+		t.Fatalf("Readdir(1) failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Readdir(1): got %d entries, want 1", len(entries))
+	}
+
+	// Readdir with n=0 (get rest)
+	entries, err = f.Readdir(0)
+	if err != nil {
+		t.Fatalf("Readdir(0) failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Readdir(0): got %d entries, want 1", len(entries))
+	}
+
+	// Readdir should return EOF
+	_, err = f.Readdir(1)
+	if err != io.EOF {
+		t.Errorf("Readdir after exhaustion: got %v, want io.EOF", err)
+	}
+}
+
+func TestC4FSGlobPatterns(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create files
+	c4fs.WriteFile("file1.txt", []byte("a"), 0644)
+	c4fs.WriteFile("file2.txt", []byte("b"), 0644)
+	c4fs.WriteFile("data.json", []byte("{}"), 0644)
+	c4fs.MkdirAll("dir", 0755)
+	c4fs.WriteFile("dir/nested.txt", []byte("c"), 0644)
+
+	// Glob for txt files
+	matches, err := c4fs.Glob("*.txt")
+	if err != nil {
+		t.Fatalf("Glob failed: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Errorf("Glob *.txt: got %d matches, want 2", len(matches))
+	}
+
+	// Glob for json files
+	matches, err = c4fs.Glob("*.json")
+	if err != nil {
+		t.Fatalf("Glob json failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("Glob *.json: got %d matches, want 1", len(matches))
+	}
+}
+
+func TestC4FSDirFileReaddirnames(t *testing.T) {
+	adapter := NewStoreAdapter(store.NewRAM())
+	c4fs := New(nil, adapter)
+
+	// Create directory with files
+	c4fs.MkdirAll("testdir", 0755)
+	c4fs.WriteFile("testdir/file1.txt", []byte("a"), 0644)
+	c4fs.WriteFile("testdir/file2.txt", []byte("b"), 0644)
+
+	// Open directory
+	f, _ := c4fs.OpenFile("testdir", os.O_RDONLY, 0)
+	defer f.Close()
+
+	// Readdirnames with n=1
+	names, err := f.Readdirnames(1)
+	if err != nil {
+		t.Fatalf("Readdirnames(1) failed: %v", err)
+	}
+	if len(names) != 1 {
+		t.Errorf("Readdirnames(1): got %d names, want 1", len(names))
+	}
+
+	// Readdirnames with n=0 (get rest)
+	names, err = f.Readdirnames(0)
+	if err != nil {
+		t.Fatalf("Readdirnames(0) failed: %v", err)
+	}
+	if len(names) != 1 {
+		t.Errorf("Readdirnames(0): got %d names, want 1", len(names))
+	}
+
+	// Should return EOF
+	_, err = f.Readdirnames(1)
+	if err != io.EOF {
+		t.Errorf("Readdirnames after exhaustion: got %v, want io.EOF", err)
 	}
 }
