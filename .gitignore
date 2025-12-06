@@ -31,3 +31,8 @@ Thumbs.db
 # C4 test data
 testdata/c4store/
 *.c4m
+
+# Claude and project metadata
+.claude/
+CLAUDE.md
+.project_meta/
