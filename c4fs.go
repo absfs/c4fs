@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,6 +25,18 @@ type FS struct {
 	store      *StoreAdapter           // Content storage
 	baseIndex  map[string]*c4m.Entry   // Index for fast base lookups
 	layerIndex map[string]*c4m.Entry   // Index for fast layer lookups
+}
+
+// cleanPath normalizes a path using forward slashes for internal storage.
+// This ensures consistent path handling across different operating systems.
+func cleanPath(p string) string {
+	// Convert to forward slashes and clean
+	p = filepath.ToSlash(p)
+	p = path.Clean(p)
+	if p == "." {
+		return ""
+	}
+	return p
 }
 
 // buildIndex creates a path -> entry index from a manifest for O(1) lookups.
@@ -72,18 +85,18 @@ func NewWithLayer(base, layer *c4m.Manifest, store *StoreAdapter) *FS {
 // getEntry looks up an entry in the filesystem.
 // Checks layer first, then falls back to base.
 // Returns error if entry is a tombstone (deleted).
-func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
+func (c4fs *FS) getEntry(p string) (*c4m.Entry, error) {
 	c4fs.mu.RLock()
 	defer c4fs.mu.RUnlock()
 
-	// Normalize path
-	path = filepath.Clean(path)
-	if path == "." || path == "/" {
-		path = ""
+	// Normalize path using forward slashes
+	p = cleanPath(p)
+	if p == "/" {
+		p = ""
 	}
 
 	// Special case: root directory always exists as a virtual directory
-	if path == "" {
+	if p == "" {
 		return &c4m.Entry{
 			Mode:      fs.ModeDir | 0755,
 			Timestamp: time.Now().UTC(),
@@ -94,12 +107,12 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 	}
 
 	// Check layer first using index for O(1) lookup
-	if entry, exists := c4fs.layerIndex[path]; exists {
+	if entry, exists := c4fs.layerIndex[p]; exists {
 		// Check for tombstone (Size = -1 means deleted)
 		if entry.Size == -1 {
 			return nil, &fs.PathError{
 				Op:   "stat",
-				Path: path,
+				Path: p,
 				Err:  fs.ErrNotExist,
 			}
 		}
@@ -107,13 +120,13 @@ func (c4fs *FS) getEntry(path string) (*c4m.Entry, error) {
 	}
 
 	// Fall back to base using index for O(1) lookup
-	if entry, exists := c4fs.baseIndex[path]; exists {
+	if entry, exists := c4fs.baseIndex[p]; exists {
 		return entry, nil
 	}
 
 	return nil, &fs.PathError{
 		Op:   "stat",
-		Path: path,
+		Path: p,
 		Err:  fs.ErrNotExist,
 	}
 }
@@ -128,7 +141,7 @@ func (c4fs *FS) Stat(name string) (fs.FileInfo, error) {
 	}
 
 	return &fileInfo{
-		name:    filepath.Base(entry.Name),
+		name:    path.Base(entry.Name),
 		size:    entry.Size,
 		mode:    entry.Mode,
 		modTime: entry.Timestamp,
@@ -166,7 +179,7 @@ func (c4fs *FS) openFile(name string, entry *c4m.Entry) (fs.File, error) {
 	}
 
 	info := &fileInfo{
-		name:    filepath.Base(entry.Name),
+		name:    path.Base(entry.Name),
 		size:    entry.Size,
 		mode:    entry.Mode,
 		modTime: entry.Timestamp,
@@ -188,7 +201,7 @@ func (c4fs *FS) openDir(name string, entry *c4m.Entry) (fs.File, error) {
 	}
 
 	info := &fileInfo{
-		name:    filepath.Base(entry.Name),
+		name:    path.Base(entry.Name),
 		size:    entry.Size,
 		mode:    entry.Mode | fs.ModeDir,
 		modTime: entry.Timestamp,
@@ -206,9 +219,9 @@ func (c4fs *FS) readDir(name string) ([]fs.DirEntry, error) {
 	c4fs.mu.RLock()
 	defer c4fs.mu.RUnlock()
 
-	// Normalize path
-	name = filepath.Clean(name)
-	if name == "." || name == "/" {
+	// Normalize path using forward slashes
+	name = cleanPath(name)
+	if name == "/" {
 		name = ""
 	}
 
@@ -220,7 +233,7 @@ func (c4fs *FS) readDir(name string) ([]fs.DirEntry, error) {
 	// Add entries from layer (and track tombstones)
 	for _, e := range c4fs.layer.Entries {
 		if c4fs.isDirectChild(name, e.Name) {
-			basename := filepath.Base(e.Name)
+			basename := path.Base(e.Name)
 			if !seen[basename] {
 				seen[basename] = true
 				// Check for tombstone
@@ -244,7 +257,7 @@ func (c4fs *FS) readDir(name string) ([]fs.DirEntry, error) {
 	// Add entries from base (if not already in layer and not tombstoned)
 	for _, e := range c4fs.base.Entries {
 		if c4fs.isDirectChild(name, e.Name) {
-			basename := filepath.Base(e.Name)
+			basename := path.Base(e.Name)
 			if !seen[basename] && !tombstones[basename] {
 				seen[basename] = true
 				entries = append(entries, &dirEntry{
@@ -265,10 +278,12 @@ func (c4fs *FS) readDir(name string) ([]fs.DirEntry, error) {
 
 // isDirectChild checks if childPath is a direct child of parentPath.
 func (c4fs *FS) isDirectChild(parentPath, childPath string) bool {
-	parentPath = filepath.Clean(parentPath)
-	childPath = filepath.Clean(childPath)
+	// Both paths should already be normalized with forward slashes
+	// from the manifest, but clean them to be safe
+	parentPath = cleanPath(parentPath)
+	childPath = cleanPath(childPath)
 
-	if parentPath == "." || parentPath == "/" {
+	if parentPath == "/" {
 		parentPath = ""
 	}
 
@@ -461,7 +476,7 @@ func (c4fs *FS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 		Mode:      perm,
 		Timestamp: time.Now().UTC(),
 		Size:      int64(len(data)),
-		Name:      filepath.Clean(name),
+		Name:      cleanPath(name),
 		C4ID:      id,
 	}
 
@@ -482,8 +497,8 @@ func (c4fs *FS) Mkdir(name string, perm fs.FileMode) error {
 	c4fs.mu.Lock()
 	defer c4fs.mu.Unlock()
 
-	name = filepath.Clean(name)
-	if name == "." || name == "/" {
+	name = cleanPath(name)
+	if name == "/" {
 		name = ""
 	}
 
@@ -526,7 +541,7 @@ func (c4fs *FS) Mkdir(name string, perm fs.FileMode) error {
 
 // MkdirAll creates a directory and all necessary parents.
 func (c4fs *FS) MkdirAll(name string, perm fs.FileMode) error {
-	name = filepath.Clean(name)
+	name = cleanPath(name)
 
 	// If already exists, check if it's a directory
 	if c4fs.Exists(name) {
@@ -541,7 +556,7 @@ func (c4fs *FS) MkdirAll(name string, perm fs.FileMode) error {
 	}
 
 	// Get parent directory
-	parent := filepath.Dir(name)
+	parent := path.Dir(name)
 	if parent != "." && parent != "/" && parent != "" {
 		// Recursively create parent
 		if err := c4fs.MkdirAll(parent, perm); err != nil {
@@ -556,8 +571,8 @@ func (c4fs *FS) MkdirAll(name string, perm fs.FileMode) error {
 // Remove removes the named file or empty directory.
 // In a copy-on-write filesystem, this adds a tombstone marker to the layer.
 func (c4fs *FS) Remove(name string) error {
-	name = filepath.Clean(name)
-	if name == "." || name == "/" {
+	name = cleanPath(name)
+	if name == "/" {
 		name = ""
 	}
 
@@ -611,7 +626,7 @@ func (c4fs *FS) Remove(name string) error {
 // RemoveAll removes a path and any children it contains.
 // For directories, it recursively removes all contents.
 func (c4fs *FS) RemoveAll(name string) error {
-	name = filepath.Clean(name)
+	name = cleanPath(name)
 
 	// Check if exists
 	entry, err := c4fs.getEntry(name)
@@ -632,7 +647,7 @@ func (c4fs *FS) RemoveAll(name string) error {
 
 		// Recursively remove all children
 		for _, e := range entries {
-			childPath := filepath.Join(name, e.Name())
+			childPath := path.Join(name, e.Name())
 			if err := c4fs.RemoveAll(childPath); err != nil {
 				return err
 			}
@@ -667,12 +682,12 @@ func isPathErrorWithNotExist(err error) bool {
 // Rename renames (moves) oldpath to newpath.
 // For directories, all children are recursively renamed.
 func (c4fs *FS) Rename(oldname, newname string) error {
-	oldname = filepath.Clean(oldname)
-	newname = filepath.Clean(newname)
-	if oldname == "." || oldname == "/" {
+	oldname = cleanPath(oldname)
+	newname = cleanPath(newname)
+	if oldname == "/" {
 		oldname = ""
 	}
-	if newname == "." || newname == "/" {
+	if newname == "/" {
 		newname = ""
 	}
 
@@ -791,8 +806,8 @@ func (c4fs *FS) Rename(oldname, newname string) error {
 // This implements fs.SubFS for better composability.
 func (c4fs *FS) Sub(dir string) (fs.FS, error) {
 	// Normalize the directory path
-	dir = filepath.Clean(dir)
-	if dir == "." || dir == "/" {
+	dir = cleanPath(dir)
+	if dir == "/" {
 		dir = ""
 	}
 
@@ -873,7 +888,7 @@ func (s *subFS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
-	fullPath := filepath.Join(s.prefix, name)
+	fullPath := path.Join(s.prefix, name)
 	return s.parent.Open(fullPath)
 }
 
@@ -881,7 +896,7 @@ func (s *subFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
 	}
-	fullPath := filepath.Join(s.prefix, name)
+	fullPath := path.Join(s.prefix, name)
 	return s.parent.ReadDir(fullPath)
 }
 
@@ -889,7 +904,7 @@ func (s *subFS) ReadFile(name string) ([]byte, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "readfile", Path: name, Err: fs.ErrInvalid}
 	}
-	fullPath := filepath.Join(s.prefix, name)
+	fullPath := path.Join(s.prefix, name)
 	return s.parent.ReadFile(fullPath)
 }
 
@@ -897,23 +912,28 @@ func (s *subFS) Stat(name string) (fs.FileInfo, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
 	}
-	fullPath := filepath.Join(s.prefix, name)
+	fullPath := path.Join(s.prefix, name)
 	return s.parent.Stat(fullPath)
 }
 
 func (s *subFS) Glob(pattern string) ([]string, error) {
 	// Get all matches from parent
-	matches, err := s.parent.Glob(filepath.Join(s.prefix, pattern))
+	matches, err := s.parent.Glob(path.Join(s.prefix, pattern))
 	if err != nil {
 		return nil, err
 	}
 
 	// Strip prefix from matches
 	var result []string
+	prefixWithSlash := s.prefix + "/"
 	for _, match := range matches {
-		rel, err := filepath.Rel(s.prefix, match)
-		if err == nil && !strings.HasPrefix(rel, "..") {
-			result = append(result, rel)
+		if s.prefix == "" {
+			result = append(result, match)
+		} else if strings.HasPrefix(match, prefixWithSlash) {
+			rel := strings.TrimPrefix(match, prefixWithSlash)
+			if !strings.HasPrefix(rel, "..") {
+				result = append(result, rel)
+			}
 		}
 	}
 
@@ -924,7 +944,7 @@ func (s *subFS) Sub(dir string) (fs.FS, error) {
 	if !fs.ValidPath(dir) {
 		return nil, &fs.PathError{Op: "sub", Path: dir, Err: fs.ErrInvalid}
 	}
-	fullPath := filepath.Join(s.prefix, dir)
+	fullPath := path.Join(s.prefix, dir)
 	return s.parent.Sub(fullPath)
 }
 
@@ -965,7 +985,7 @@ func (c4fs *FS) Chmod(name string, mode fs.FileMode) error {
 		Mode:      mode,
 		Timestamp: entry.Timestamp, // Preserve timestamp
 		Size:      entry.Size,
-		Name:      filepath.Clean(name),
+		Name:      cleanPath(name),
 		C4ID:      entry.C4ID,
 		Target:    entry.Target,
 	}
@@ -990,7 +1010,7 @@ func (c4fs *FS) Chtimes(name string, atime, mtime time.Time) error {
 		Mode:      entry.Mode,
 		Timestamp: mtime,
 		Size:      entry.Size,
-		Name:      filepath.Clean(name),
+		Name:      cleanPath(name),
 		C4ID:      entry.C4ID,
 		Target:    entry.Target,
 	}
@@ -1040,7 +1060,7 @@ func (c4fs *FS) Symlink(target, name string) error {
 	c4fs.mu.Lock()
 	defer c4fs.mu.Unlock()
 
-	name = filepath.Clean(name)
+	name = cleanPath(name)
 
 	// Check if already exists
 	if entry := c4fs.layer.GetEntry(name); entry != nil && entry.Size != -1 {
@@ -1101,7 +1121,7 @@ func (c4fs *FS) Lstat(name string) (fs.FileInfo, error) {
 	}
 
 	return &fileInfo{
-		name:    filepath.Base(entry.Name),
+		name:    path.Base(entry.Name),
 		size:    entry.Size,
 		mode:    entry.Mode,
 		modTime: entry.Timestamp,
@@ -1110,18 +1130,18 @@ func (c4fs *FS) Lstat(name string) (fs.FileInfo, error) {
 }
 
 // lstatEntry is like getEntry but doesn't follow symlinks.
-func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
+func (c4fs *FS) lstatEntry(p string) (*c4m.Entry, error) {
 	c4fs.mu.RLock()
 	defer c4fs.mu.RUnlock()
 
-	// Normalize path
-	path = filepath.Clean(path)
-	if path == "." || path == "/" {
-		path = ""
+	// Normalize path using forward slashes
+	p = cleanPath(p)
+	if p == "/" {
+		p = ""
 	}
 
 	// Special case: root directory always exists as a virtual directory
-	if path == "" {
+	if p == "" {
 		return &c4m.Entry{
 			Mode:      fs.ModeDir | 0755,
 			Timestamp: time.Now().UTC(),
@@ -1132,12 +1152,12 @@ func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
 	}
 
 	// Check layer first using index for O(1) lookup
-	if entry, exists := c4fs.layerIndex[path]; exists {
+	if entry, exists := c4fs.layerIndex[p]; exists {
 		// Check for tombstone (Size = -1 means deleted)
 		if entry.Size == -1 {
 			return nil, &fs.PathError{
 				Op:   "lstat",
-				Path: path,
+				Path: p,
 				Err:  fs.ErrNotExist,
 			}
 		}
@@ -1145,13 +1165,13 @@ func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
 	}
 
 	// Fall back to base using index for O(1) lookup
-	if entry, exists := c4fs.baseIndex[path]; exists {
+	if entry, exists := c4fs.baseIndex[p]; exists {
 		return entry, nil
 	}
 
 	return nil, &fs.PathError{
 		Op:   "lstat",
-		Path: path,
+		Path: p,
 		Err:  fs.ErrNotExist,
 	}
 }
@@ -1159,20 +1179,20 @@ func (c4fs *FS) lstatEntry(path string) (*c4m.Entry, error) {
 // resolveSymlink resolves a symlink entry to its target entry.
 // It follows symlink chains up to a maximum depth to prevent infinite loops.
 // This also resolves symlinks in the directory path (e.g., "dirlink/file.txt").
-func (c4fs *FS) resolveSymlink(path string, maxDepth int) (*c4m.Entry, error) {
+func (c4fs *FS) resolveSymlink(p string, maxDepth int) (*c4m.Entry, error) {
 	if maxDepth <= 0 {
 		return nil, &fs.PathError{
 			Op:   "stat",
-			Path: path,
+			Path: p,
 			Err:  fmt.Errorf("too many levels of symbolic links"),
 		}
 	}
 
-	// Clean the path
-	path = filepath.Clean(path)
+	// Clean the path using forward slashes
+	p = cleanPath(p)
 
 	// Resolve symlinks in each component of the path
-	components := strings.Split(path, "/")
+	components := strings.Split(p, "/")
 	resolvedPath := ""
 
 	for i, component := range components {
@@ -1184,7 +1204,7 @@ func (c4fs *FS) resolveSymlink(path string, maxDepth int) (*c4m.Entry, error) {
 		if resolvedPath == "" {
 			resolvedPath = component
 		} else {
-			resolvedPath = filepath.Join(resolvedPath, component)
+			resolvedPath = path.Join(resolvedPath, component)
 		}
 
 		// Check if this component is a symlink
@@ -1199,17 +1219,17 @@ func (c4fs *FS) resolveSymlink(path string, maxDepth int) (*c4m.Entry, error) {
 			target := entry.Target
 
 			// Handle relative vs absolute paths
-			if !filepath.IsAbs(target) {
-				dir := filepath.Dir(resolvedPath)
+			if !path.IsAbs(target) {
+				dir := path.Dir(resolvedPath)
 				if dir != "." && dir != "" {
-					target = filepath.Join(dir, target)
+					target = path.Join(dir, target)
 				}
 			}
 
 			// If there are more components, append them to the target
 			if i < len(components)-1 {
-				remaining := filepath.Join(components[i+1:]...)
-				target = filepath.Join(target, remaining)
+				remaining := path.Join(components[i+1:]...)
+				target = path.Join(target, remaining)
 			}
 
 			// Recursively resolve from the target
