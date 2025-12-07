@@ -1,5 +1,10 @@
 # c4fs - Content-Addressable Filesystem
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/absfs/c4fs.svg)](https://pkg.go.dev/github.com/absfs/c4fs)
+[![Go Report Card](https://goreportcard.com/badge/github.com/absfs/c4fs)](https://goreportcard.com/report/github.com/absfs/c4fs)
+[![CI](https://github.com/absfs/c4fs/actions/workflows/ci.yml/badge.svg)](https://github.com/absfs/c4fs/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A content-addressable filesystem for the absfs ecosystem using C4 IDs (SMPTE ST 2114:2017) with transparent hydration/dehydration, snapshots, and efficient sync.
 
 ## Overview
