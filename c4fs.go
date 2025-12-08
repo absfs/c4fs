@@ -865,13 +865,13 @@ func (c4fs *FS) Glob(pattern string) ([]string, error) {
 
 	// Filter by pattern
 	var matches []string
-	for _, path := range allPaths {
-		matched, err := filepath.Match(pattern, path)
+	for _, p := range allPaths {
+		matched, err := path.Match(pattern, p)
 		if err != nil {
 			return nil, err
 		}
 		if matched {
-			matches = append(matches, path)
+			matches = append(matches, p)
 		}
 	}
 

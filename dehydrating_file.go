@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path/filepath"
+	"path"
 	"time"
 
 	"github.com/Avalanche-io/c4/c4m"
@@ -24,7 +24,7 @@ type dehydratingFile struct {
 func newDehydratingFile(c4fs *FS, name string, perm fs.FileMode) (*dehydratingFile, error) {
 	return &dehydratingFile{
 		c4fs: c4fs,
-		name: filepath.Clean(name),
+		name: path.Clean(name),
 		perm: perm,
 		buf:  new(bytes.Buffer),
 		pos:  0,
@@ -82,7 +82,7 @@ func (f *dehydratingFile) Seek(offset int64, whence int) (int64, error) {
 // Stat returns file information.
 func (f *dehydratingFile) Stat() (fs.FileInfo, error) {
 	return &fileInfo{
-		name:    filepath.Base(f.name),
+		name:    path.Base(f.name),
 		size:    int64(f.buf.Len()),
 		mode:    f.perm,
 		modTime: time.Now().UTC(),
