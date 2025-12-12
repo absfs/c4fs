@@ -95,6 +95,59 @@ func (f *dehydratingFile) Sync() error {
 	return nil
 }
 
+// ReadDir is not supported on write-only files.
+func (f *dehydratingFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	return nil, &fs.PathError{
+		Op:   "readdir",
+		Path: f.name,
+		Err:  fmt.Errorf("file opened for writing"),
+	}
+}
+
+// ReadAt is not supported on write-only files.
+func (f *dehydratingFile) ReadAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "read",
+		Path: f.name,
+		Err:  fmt.Errorf("file opened for writing"),
+	}
+}
+
+// Truncate changes the size of the file.
+func (f *dehydratingFile) Truncate(size int64) error {
+	if size == 0 {
+		f.buf.Reset()
+		f.pos = 0
+		return nil
+	}
+	// Truncate to specific size
+	if size < int64(f.buf.Len()) {
+		f.buf.Truncate(int(size))
+		if f.pos > size {
+			f.pos = size
+		}
+		return nil
+	}
+	// Pad with zeros if size is larger
+	padding := make([]byte, size-int64(f.buf.Len()))
+	f.buf.Write(padding)
+	return nil
+}
+
+// Readdirnames is not supported on write-only files.
+func (f *dehydratingFile) Readdirnames(n int) ([]string, error) {
+	return nil, &fs.PathError{
+		Op:   "readdirnames",
+		Path: f.name,
+		Err:  fmt.Errorf("file opened for writing"),
+	}
+}
+
+// Name returns the name of the file.
+func (f *dehydratingFile) Name() string {
+	return f.name
+}
+
 // Close dehydrates the buffered content to the store and updates the manifest.
 func (f *dehydratingFile) Close() error {
 	// Get buffered data

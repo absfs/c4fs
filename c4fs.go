@@ -166,6 +166,31 @@ func (c4fs *FS) Open(name string) (fs.File, error) {
 	return c4fs.openFile(name, entry)
 }
 
+// OpenFile opens a file with the specified flags and permissions.
+// This is required by the absfs.Filer interface.
+func (c4fs *FS) OpenFile(name string, flag int, perm fs.FileMode) (File, error) {
+	// For read-only access, use Open
+	if flag == 0 || flag == 1 { // O_RDONLY
+		f, err := c4fs.Open(name)
+		if err != nil {
+			return nil, err
+		}
+		// Wrap fs.File to satisfy File interface
+		if file, ok := f.(File); ok {
+			return file, nil
+		}
+		return nil, &fs.PathError{
+			Op:   "open",
+			Path: name,
+			Err:  fmt.Errorf("file does not implement File interface"),
+		}
+	}
+
+	// For write operations, use Create
+	// Note: This is a simplified implementation that doesn't handle all flag combinations
+	return c4fs.Create(name)
+}
+
 // openFile opens a regular file for reading (hydration).
 func (c4fs *FS) openFile(name string, entry *c4m.Entry) (fs.File, error) {
 	// Get content from store
@@ -365,6 +390,87 @@ func (d *dirFile) ReadDir(n int) ([]fs.DirEntry, error) {
 	d.pos = end
 
 	return entries, nil
+}
+
+func (d *dirFile) Write(p []byte) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "write",
+		Path: d.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (d *dirFile) WriteAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "write",
+		Path: d.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (d *dirFile) WriteString(s string) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "write",
+		Path: d.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (d *dirFile) ReadAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "read",
+		Path: d.info.name,
+		Err:  fmt.Errorf("is a directory"),
+	}
+}
+
+func (d *dirFile) Seek(offset int64, whence int) (int64, error) {
+	// Allow seeking within the directory entries list
+	switch whence {
+	case io.SeekStart:
+		d.pos = int(offset)
+	case io.SeekCurrent:
+		d.pos += int(offset)
+	case io.SeekEnd:
+		d.pos = len(d.entries) + int(offset)
+	default:
+		return 0, fmt.Errorf("invalid whence")
+	}
+	if d.pos < 0 {
+		d.pos = 0
+	}
+	if d.pos > len(d.entries) {
+		d.pos = len(d.entries)
+	}
+	return int64(d.pos), nil
+}
+
+func (d *dirFile) Sync() error {
+	return nil
+}
+
+func (d *dirFile) Truncate(size int64) error {
+	return &fs.PathError{
+		Op:   "truncate",
+		Path: d.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (d *dirFile) Readdirnames(n int) ([]string, error) {
+	entries, err := d.ReadDir(n)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.Name()
+	}
+	return names, nil
+}
+
+func (d *dirFile) Name() string {
+	return d.info.name
 }
 
 // Flatten merges the base and layer manifests into a new manifest.
@@ -948,6 +1054,73 @@ func (s *subFS) Sub(dir string) (fs.FS, error) {
 	return s.parent.Sub(fullPath)
 }
 
+// OpenFile opens a file in the sub filesystem.
+func (s *subFS) OpenFile(name string, flag int, perm fs.FileMode) (File, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(s.prefix, name)
+	return s.parent.OpenFile(fullPath, flag, perm)
+}
+
+// Mkdir creates a directory in the sub filesystem.
+func (s *subFS) Mkdir(name string, perm fs.FileMode) error {
+	if !fs.ValidPath(name) {
+		return &fs.PathError{Op: "mkdir", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(s.prefix, name)
+	return s.parent.Mkdir(fullPath, perm)
+}
+
+// Remove removes a file or directory in the sub filesystem.
+func (s *subFS) Remove(name string) error {
+	if !fs.ValidPath(name) {
+		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(s.prefix, name)
+	return s.parent.Remove(fullPath)
+}
+
+// Rename renames a file in the sub filesystem.
+func (s *subFS) Rename(oldpath, newpath string) error {
+	if !fs.ValidPath(oldpath) {
+		return &fs.PathError{Op: "rename", Path: oldpath, Err: fs.ErrInvalid}
+	}
+	if !fs.ValidPath(newpath) {
+		return &fs.PathError{Op: "rename", Path: newpath, Err: fs.ErrInvalid}
+	}
+	fullOld := path.Join(s.prefix, oldpath)
+	fullNew := path.Join(s.prefix, newpath)
+	return s.parent.Rename(fullOld, fullNew)
+}
+
+// Chmod changes the mode of a file in the sub filesystem.
+func (s *subFS) Chmod(name string, mode fs.FileMode) error {
+	if !fs.ValidPath(name) {
+		return &fs.PathError{Op: "chmod", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(s.prefix, name)
+	return s.parent.Chmod(fullPath, mode)
+}
+
+// Chtimes changes the access and modification times in the sub filesystem.
+func (s *subFS) Chtimes(name string, atime, mtime time.Time) error {
+	if !fs.ValidPath(name) {
+		return &fs.PathError{Op: "chtimes", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(s.prefix, name)
+	return s.parent.Chtimes(fullPath, atime, mtime)
+}
+
+// Chown changes the owner and group ids in the sub filesystem.
+func (s *subFS) Chown(name string, uid, gid int) error {
+	if !fs.ValidPath(name) {
+		return &fs.PathError{Op: "chown", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(s.prefix, name)
+	return s.parent.Chown(fullPath, uid, gid)
+}
+
 // updateEntryInLayer adds or updates an entry in the layer manifest.
 // If an entry with the same name exists in the layer, it is removed first.
 // This also updates the layer index for O(1) lookups.
@@ -1019,6 +1192,19 @@ func (c4fs *FS) Chtimes(name string, atime, mtime time.Time) error {
 	c4fs.updateEntryInLayer(newEntry)
 	c4fs.mu.Unlock()
 
+	return nil
+}
+
+// Chown changes the owner and group ids of the named file.
+// This is a no-op for content-addressable filesystems since ownership
+// is not part of the content identity.
+func (c4fs *FS) Chown(name string, uid, gid int) error {
+	// Verify the file exists
+	_, err := c4fs.getEntry(name)
+	if err != nil {
+		return err
+	}
+	// C4FS doesn't track ownership, so this is a no-op
 	return nil
 }
 

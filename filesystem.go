@@ -1,6 +1,7 @@
 package c4fs
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -39,11 +40,21 @@ type File interface {
 	WriteAt(p []byte, off int64) (n int, err error)
 	WriteString(s string) (n int, err error)
 
+	// Read operations
+	ReadAt(p []byte, off int64) (n int, err error)
+
 	// Seek operation
 	Seek(offset int64, whence int) (int64, error)
 
 	// Sync operation
 	Sync() error
+
+	// Truncate operation
+	Truncate(size int64) error
+
+	// Directory operations
+	Readdirnames(n int) (names []string, err error)
+	ReadDir(n int) ([]fs.DirEntry, error)
 }
 
 // FileInfo is an alias for fs.FileInfo for convenience.
@@ -90,6 +101,78 @@ func (f *readOnlyFile) Read(p []byte) (int, error) {
 	n, err := f.ReadCloser.Read(p)
 	f.pos += int64(n)
 	return n, err
+}
+
+func (f *readOnlyFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	return nil, &fs.PathError{
+		Op:   "readdir",
+		Path: f.info.name,
+		Err:  fs.ErrInvalid,
+	}
+}
+
+func (f *readOnlyFile) Write(p []byte) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "write",
+		Path: f.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (f *readOnlyFile) WriteAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "write",
+		Path: f.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (f *readOnlyFile) WriteString(s string) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "write",
+		Path: f.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (f *readOnlyFile) ReadAt(p []byte, off int64) (int, error) {
+	return 0, &fs.PathError{
+		Op:   "read",
+		Path: f.info.name,
+		Err:  fmt.Errorf("ReadAt not supported on streaming files"),
+	}
+}
+
+func (f *readOnlyFile) Seek(offset int64, whence int) (int64, error) {
+	return 0, &fs.PathError{
+		Op:   "seek",
+		Path: f.info.name,
+		Err:  fmt.Errorf("Seek not supported on streaming files"),
+	}
+}
+
+func (f *readOnlyFile) Sync() error {
+	return nil
+}
+
+func (f *readOnlyFile) Truncate(size int64) error {
+	return &fs.PathError{
+		Op:   "truncate",
+		Path: f.info.name,
+		Err:  fs.ErrPermission,
+	}
+}
+
+func (f *readOnlyFile) Readdirnames(n int) ([]string, error) {
+	return nil, &fs.PathError{
+		Op:   "readdirnames",
+		Path: f.info.name,
+		Err:  fs.ErrInvalid,
+	}
+}
+
+func (f *readOnlyFile) Name() string {
+	return f.info.name
 }
 
 // writeFile implements File for write operations.

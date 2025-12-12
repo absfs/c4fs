@@ -1,6 +1,8 @@
-github.com/Avalanche-io/c4 v0.8.1 h1:ORfaSwha4htPoHhgB6qAI1qwLOWxC/oR6CNfUvemNuQ=
-github.com/Avalanche-io/c4 v0.8.1/go.mod h1:p8cbeFJGUx1eQXQclWCkocf3fx0JXtaUTjEn9mTQZEg=
 github.com/Avalanche-io/c4 v0.8.2-0.20251123060733-2d37ddd07577 h1:FIAB6lP5xigyYjp2w1jxgReaUKcCtfC62Set7PGokBk=
 github.com/Avalanche-io/c4 v0.8.2-0.20251123060733-2d37ddd07577/go.mod h1:ub2If5UOnZxZU4wcgRgbO0GECltXi9Ul22a40kp4GFA=
+github.com/absfs/inode v0.0.0-20190804195220-b7cd14cdd0dc h1:KjciuTgBUzV6RfeVLd/Ijhy9Iq7z0JoJ44te3fZaaNE=
+github.com/absfs/inode v0.0.0-20190804195220-b7cd14cdd0dc/go.mod h1:lc9vQxyCSyrjclBTgazRvacmElJLj7VfpDmgDnL77o0=
+github.com/absfs/memfs v0.0.0-20230318170722-e8d59e67c8b1 h1:bivMPRSx6Tb1/Cm9P0GcTfFBO++9f0w3o0YfepmRaMQ=
+github.com/absfs/memfs v0.0.0-20230318170722-e8d59e67c8b1/go.mod h1:ITY8mYr6yHK7ZTNblu5zQk33tMIRaJhoa+YX8/talDk=
 github.com/xtgo/set v1.0.0 h1:6BCNBRv3ORNDQ7fyoJXRv+tstJz3m1JVFQErfeZz2pY=
 github.com/xtgo/set v1.0.0/go.mod h1:d3NHzGzSa0NmB2NhFyECA+QdRp29oEn2xbT+TpeFoM8=
