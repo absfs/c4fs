@@ -40,7 +40,10 @@ func TestCaptureSequenceCopiedMember(t *testing.T) {
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Chmod("/plates/shot.0002.exr", 0o600); err != nil {
+	// Read-only: a new mode every host can hold (Windows keeps only the
+	// read-only attribute, so 0o600 would scan as -rw-rw-rw-).
+	const mode = 0o444
+	if err := w.Chmod("/plates/shot.0002.exr", mode); err != nil {
 		t.Fatal(err)
 	}
 	cs := capture(t, w, st)
@@ -51,7 +54,7 @@ func TestCaptureSequenceCopiedMember(t *testing.T) {
 		}
 	}
 	// The same change on disk, identified as c4 id does.
-	if err := os.Chmod(filepath.Join(dir, "plates", "shot.0002.exr"), 0o600); err != nil {
+	if err := os.Chmod(filepath.Join(dir, "plates", "shot.0002.exr"), mode); err != nil {
 		t.Fatal(err)
 	}
 	if want := scanTree(t, dir).ComputeC4ID(); cs.ID != want {

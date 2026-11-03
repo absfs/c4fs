@@ -71,3 +71,13 @@ var (
 func pathErr(op, name string, err error) error {
 	return &fs.PathError{Op: op, Path: name, Err: err}
 }
+
+// notExist reports whether err from a lookup in the tree means the name
+// is absent. It is errors.Is(err, fs.ErrNotExist) except for errNotDir:
+// on Windows syscall.ENOTDIR is ERROR_PATH_NOT_FOUND, which matches
+// fs.ErrNotExist, and a path through a file would pass for a missing
+// one (RemoveAll("/file/x") would succeed). The trees are virtual and
+// must answer the same on every platform.
+func notExist(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errNotDir)
+}

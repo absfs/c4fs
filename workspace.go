@@ -422,7 +422,7 @@ func (w *Workspace) unlink(dir *wnode, name string, keep bool) {
 // harmless, a missing one would let the name reappear.
 func (w *Workspace) baseHas(dir *node, name string) bool {
 	_, err := w.baseChild(dir, name)
-	return !errors.Is(err, fs.ErrNotExist)
+	return !notExist(err)
 }
 
 // detach marks a removed subtree and releases the scratch content of
@@ -772,7 +772,7 @@ func (w *Workspace) openWrite(name string, flag int, perm os.FileMode, limit int
 	for {
 		r, phys, err := w.walk("open", name, true)
 		if err != nil {
-			if flag&os.O_CREATE != 0 && errors.Is(err, fs.ErrNotExist) {
+			if flag&os.O_CREATE != 0 && notExist(err) {
 				return w.create(name, flag, perm)
 			}
 			return nil, err
@@ -851,7 +851,7 @@ func (w *Workspace) create(name string, flag int, perm os.FileMode) (absfs.File,
 			p = path.Clean(target)
 			continue
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
+		if !notExist(err) {
 			return nil, pathErr("open", name, err)
 		}
 		sp := w.newScratchPath()
@@ -995,7 +995,7 @@ func (w *Workspace) mkdir(name string, perm os.FileMode) error {
 	}
 	if _, err := w.child(d, base); err == nil {
 		return pathErr("mkdir", name, fs.ErrExist)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if !notExist(err) {
 		return pathErr("mkdir", name, err)
 	}
 	n := &wnode{name: base, kind: kindDir, kids: map[string]*wnode{}, entry: c4m.Entry{
@@ -1030,7 +1030,7 @@ func (w *Workspace) MkdirAll(name string, perm os.FileMode) error {
 			}
 			continue
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
+		if !notExist(err) {
 			return err
 		}
 		if err := w.mkdir(cur, perm); err != nil {
@@ -1083,7 +1083,7 @@ func (w *Workspace) RemoveAll(name string) error {
 	defer w.mu.Unlock()
 	d, phys, base, err := w.parent("removeall", name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if notExist(err) {
 			return nil
 		}
 		return err
@@ -1092,7 +1092,7 @@ func (w *Workspace) RemoveAll(name string) error {
 		return pathErr("removeall", name, errBusy)
 	}
 	if _, err := w.child(d, base); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if notExist(err) {
 			return nil
 		}
 		return pathErr("removeall", name, err)
@@ -1138,7 +1138,7 @@ func (w *Workspace) Rename(oldpath, newpath string) error {
 	}
 	dst, err := w.child(nd, nname)
 	exists := err == nil
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err != nil && !notExist(err) {
 		return fail(err)
 	}
 	if src.isDir() {
@@ -1195,7 +1195,7 @@ func (w *Workspace) Symlink(oldname, newname string) error {
 	}
 	if _, err := w.child(d, base); err == nil {
 		return fail(fs.ErrExist)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if !notExist(err) {
 		return fail(err)
 	}
 	n := &wnode{name: base, kind: kindLink, entry: c4m.Entry{

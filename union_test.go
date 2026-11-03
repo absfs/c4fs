@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -216,8 +217,17 @@ func TestUnionLower(t *testing.T) {
 	if got := readAll(t, upper, "/src/main.go"); got != "PACKAGE main\n" {
 		t.Errorf("upper = %q", got)
 	}
-	if fi, err := upper.Stat("/src/main.go"); err != nil || fi.Mode().Perm() != 0o644 {
-		t.Errorf("copied-up mode = %v %v", fi, err)
+	// The copy keeps the lower file's mode: the scanned host's, which
+	// is -rw-r--r-- here but -rw-rw-rw- on Windows.
+	lower, err := v.Stat("/src/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && lower.Mode().Perm() != 0o644 {
+		t.Fatalf("lower mode = %v", lower.Mode())
+	}
+	if fi, err := upper.Stat("/src/main.go"); err != nil || fi.Mode().Perm() != lower.Mode().Perm() {
+		t.Errorf("copied-up mode = %v %v, lower %v", fi, err, lower.Mode())
 	}
 	// A new file and a deletion.
 	nf, err := u.Create("/src/new.go")

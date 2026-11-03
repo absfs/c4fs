@@ -4,7 +4,9 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -102,9 +104,23 @@ func TestViewReadsTree(t *testing.T) {
 
 func TestStatMetadata(t *testing.T) {
 	f := newFixture(t)
-	disk, err := os.Lstat(f.dir + "/src/main.go")
+	disk, err := os.Lstat(filepath.Join(f.dir, "src", "main.go"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The View reports what the scan recorded, which is what the host
+	// reports: on Windows a directory is drwxrwxrwx and a symbolic link
+	// has size 0; elsewhere they are drwxr-xr-x and the target's length.
+	diskDir, err := os.Lstat(filepath.Join(f.dir, "src"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskLink, err := os.Lstat(filepath.Join(f.dir, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && (diskDir.Mode() != fs.ModeDir|0o755 || diskLink.Size() != int64(len("src/main.go"))) {
+		t.Fatalf("disk: dir %v, link size %d", diskDir.Mode(), diskLink.Size())
 	}
 	for how, v := range f.views(t) {
 		t.Run(how, func(t *testing.T) {
@@ -123,7 +139,7 @@ func TestStatMetadata(t *testing.T) {
 				t.Errorf("Sys = %#v", fi.Sys())
 			}
 			di, err := v.Stat("/src")
-			if err != nil || !di.IsDir() || di.Mode()&fs.ModeDir == 0 || di.Mode().Perm() != 0o755 {
+			if err != nil || !di.IsDir() || di.Mode() != diskDir.Mode() {
 				t.Errorf("dir stat = %v %v", di, err)
 			}
 			ri, err := v.Stat("/")
@@ -131,7 +147,7 @@ func TestStatMetadata(t *testing.T) {
 				t.Errorf("root stat = %v %v", ri, err)
 			}
 			li, err := v.Lstat("/link")
-			if err != nil || li.Mode()&fs.ModeSymlink == 0 || li.Size() != int64(len("src/main.go")) {
+			if err != nil || li.Mode()&fs.ModeSymlink == 0 || li.Size() != diskLink.Size() {
 				t.Errorf("lstat link = %v %v", li, err)
 			}
 			si, err := v.Stat("/link")

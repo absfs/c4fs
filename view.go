@@ -261,7 +261,7 @@ func (v *View) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, er
 	write := flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND|os.O_CREATE|os.O_TRUNC) != 0
 	n, err := v.lookup("open", name, true)
 	if err != nil {
-		if write && flag&os.O_CREATE != 0 && errors.Is(err, fs.ErrNotExist) {
+		if write && flag&os.O_CREATE != 0 && notExist(err) {
 			return nil, v.denyCreate("open", name)
 		}
 		return nil, err
@@ -403,7 +403,7 @@ func (v *View) Remove(name string) error { return v.denyExisting("remove", name,
 // otherwise fails.
 func (v *View) RemoveAll(name string) error {
 	if _, err := v.lookup("removeall", name, false); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if notExist(err) {
 			return nil
 		}
 		return err

@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -242,6 +243,22 @@ func TestCaptureMatchesScan(t *testing.T) {
 			return nil
 		}
 		wsOps{t, w}.chtimes(rel, when)
+		if runtime.GOOS == "windows" {
+			// Windows keeps no Unix permission bits, only a read-only
+			// attribute: files scan as -rw-rw-rw- or -r--r--r--, and
+			// directories as drwxrwxrwx, whatever mode they were made
+			// or chmodded with. Compare what Windows does keep, the
+			// owner's write bit, then give the workspace the host's
+			// mode so the rest of the comparison can be exact.
+			fi, err := w.Lstat(rel)
+			if err != nil {
+				return err
+			}
+			if fi.Mode().Perm()&0o200 != info.Mode().Perm()&0o200 {
+				t.Errorf("%s: workspace mode %v, disk %v", rel, fi.Mode(), info.Mode())
+			}
+			wsOps{t, w}.chmod(rel, info.Mode().Perm())
+		}
 		return os.Chtimes(p, when, when)
 	})
 	if err != nil {
@@ -375,9 +392,12 @@ func TestCaptureRestored(t *testing.T) {
 	ok(h.Close())
 	ok(w.Chtimes("/src/main.go", orig.ModTime(), orig.ModTime()))
 	ok(w.Chtimes("/src", dirInfo.ModTime(), dirInfo.ModTime()))
-	// A metadata change undone.
+	// A metadata change undone: back to the scanned mode, which is the
+	// host's (-rw-r--r-- here, -rw-rw-rw- on Windows).
+	readme, err := w.Stat("/README.md")
+	ok(err)
 	ok(w.Chmod("/README.md", 0o600))
-	ok(w.Chmod("/README.md", 0o644))
+	ok(w.Chmod("/README.md", readme.Mode()))
 	cs := capture(t, w, f.st)
 	if cs.Files != 1 {
 		t.Errorf("recreated file not hashed: %d files", cs.Files)
@@ -450,9 +470,13 @@ func TestCaptureSequences(t *testing.T) {
 	v := mustOpen(t, st, self)
 	w := newWS(t, v)
 	orig3, _ := w.Stat("/plates/shot.0003.exr")
+	orig2, err := w.Stat("/plates/shot.0002.exr") // the scanned host's mode
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A change elsewhere: the sequence stays folded.
 	wsWrite(t, w, "/notes.txt", "changed")
-	w.Chmod("/plates/shot.0002.exr", 0o644) // the same mode
+	w.Chmod("/plates/shot.0002.exr", orig2.Mode()) // the same mode
 	cs1 := capture(t, w, st)
 	full, err := cs1.Manifest()
 	if err != nil {
