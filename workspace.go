@@ -52,6 +52,11 @@ type Workspace struct {
 	seq    uint64
 	closed bool
 
+	// adopted maps each View node the workspace has taken into its
+	// change set to the workspace node standing for it, so a handle
+	// opened on the View node sees later changes.
+	adopted map[*node]*wnode
+
 	// The state the last Capture recorded, or the View's own before
 	// the first: the tree, its c4m ID, and the stores holding its
 	// content. headOK is false until the View's ID has been computed.
@@ -96,6 +101,11 @@ type wnode struct {
 	opens    int           // open handles on the scratch file
 	copying  chan struct{} // closed when an in-flight copy-up ends
 	detached bool          // removed from the tree
+
+	// noPerm marks a file whose mode was set to 0. c4m records that as
+	// its null mode, which reads back as 0644, but the workspace itself
+	// reports what the caller set.
+	noPerm bool
 
 	// Directories: the children this directory has changed. A nil value
 	// is a whiteout, hiding a child of base.
@@ -161,6 +171,7 @@ func NewWorkspace(base *View, scratch absfs.FileSystem) (*Workspace, error) {
 		now:     time.Now,
 		head:    base.root,
 		headSrc: base.src,
+		adopted: map[*node]*wnode{},
 	}
 	if id := base.id.Load(); id != nil {
 		w.headID, w.headOK = *id, true
@@ -171,7 +182,10 @@ func NewWorkspace(base *View, scratch absfs.FileSystem) (*Workspace, error) {
 	return w, nil
 }
 
-// Base returns the View the workspace was made over.
+// Base returns the View the workspace was made over. For a workspace
+// made by Resume, that is the View Resume built (its base with the chain
+// applied), not the base the chain starts from: keep that base to
+// resume the whole chain again.
 func (w *Workspace) Base() *View { return w.v }
 
 // Head returns the C4 ID of the state the last Capture recorded, which
@@ -334,7 +348,7 @@ func (w *Workspace) materialize(phys string) *wnode {
 		if !ok {
 			// walk found elem, so the View has it.
 			r, _ := w.baseChild(cur.base, elem)
-			k = adopt(r.b, elem, cur)
+			k = w.adopt(r.b, elem, cur)
 			cur.kids[elem] = k
 		}
 		cur = k
@@ -342,9 +356,12 @@ func (w *Workspace) materialize(phys string) *wnode {
 	return cur
 }
 
-// adopt makes a workspace node standing for a View node.
-func adopt(b *node, name string, parent *wnode) *wnode {
+// adopt makes a workspace node standing for a View node. A View node is
+// adopted at most once: its name is the only way to reach it, and from
+// then on that name leads to the workspace node.
+func (w *Workspace) adopt(b *node, name string, parent *wnode) *wnode {
 	n := &wnode{name: name, parent: parent, base: b, entry: *b.entry}
+	w.adopted[b] = n
 	n.entry.Depth = 0
 	switch {
 	case b.dir != nil:
@@ -477,6 +494,18 @@ func (w *Workspace) isEmpty(d ref) (bool, error) {
 	return true, nil
 }
 
+// current returns what r stands for now: a View node the workspace has
+// since adopted, because it or something beneath it changed, is the
+// workspace node that took it over. The caller holds w.mu.
+func (w *Workspace) current(r ref) ref {
+	if r.b != nil {
+		if n := w.adopted[r.b]; n != nil {
+			return ref{w: n}
+		}
+	}
+	return r
+}
+
 // info describes a name of the merged tree.
 func (w *Workspace) info(r ref, name string) os.FileInfo {
 	if r.b != nil {
@@ -490,6 +519,9 @@ func (w *Workspace) nodeInfo(n *wnode, name string) *wsInfo {
 	e := n.entry
 	e.Depth = 0
 	fi := &wsInfo{name: name, mode: modeOf(e.Mode, n.kind == kindDir, n.kind == kindLink), mtime: e.Timestamp, sys: &e}
+	if n.noPerm {
+		fi.mode &= fs.ModeType
+	}
 	switch n.kind {
 	case kindDir:
 		e.Name = n.name + "/"
@@ -658,17 +690,19 @@ func (w *Workspace) Create(name string) (absfs.File, error) {
 	return w.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 }
 
-const writeFlags = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_TRUNC
+// accessWrite are the access modes that let a handle write.
+const accessWrite = os.O_WRONLY | os.O_RDWR
 
 // OpenFile opens name with os.OpenFile's flags. perm is a new file's
 // mode, applied as given (no umask). Opening a file of the View for
-// writing, or with O_TRUNC, copies it to scratch first (O_TRUNC copies
-// nothing); opening it only to read does not. A read-only handle on a
-// file that has not been copied to scratch reads the View's content even
-// if the file is written through another handle later, as with
-// overlayfs.
+// writing (O_WRONLY or O_RDWR), or with O_TRUNC, copies it to scratch
+// first (O_TRUNC copies nothing); opening it only to read does not, even
+// with O_CREATE or O_APPEND, which a read-only handle cannot use. A
+// read-only handle on a file that has not been copied to scratch reads
+// the View's content even if the file is written through another handle
+// later, as with overlayfs.
 func (w *Workspace) OpenFile(name string, flag int, perm os.FileMode) (absfs.File, error) {
-	if flag&(writeFlags|os.O_CREATE) == 0 {
+	if flag&(accessWrite|os.O_TRUNC|os.O_CREATE) == 0 {
 		return w.openRead(name)
 	}
 	return w.openWrite(name, flag, perm, -1)
@@ -717,7 +751,7 @@ func (w *Workspace) openNode(n *wnode, name string, flag int) (absfs.File, error
 		return nil, pathErr("open", name, scratchErr(err))
 	}
 	n.opens++
-	return &wsFile{w: w, name: name, n: n, inner: inner, counted: true, write: flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND) != 0}, nil
+	return &wsFile{w: w, name: name, n: n, inner: inner, counted: true, write: flag&accessWrite != 0}, nil
 }
 
 // scratchErr unwraps a scratch filesystem's path error, so the error a
@@ -749,10 +783,20 @@ func (w *Workspace) openWrite(name string, flag int, perm os.FileMode, limit int
 		if r.isDir() {
 			return nil, pathErr("open", name, errIsDir)
 		}
+		if flag&(accessWrite|os.O_TRUNC) == 0 {
+			// O_CREATE on a file that exists, read-only: an open to read.
+			if r.w == nil {
+				return w.handle(r, name), nil
+			}
+			return w.openNode(r.w, name, os.O_RDONLY)
+		}
 		n := w.materialize(phys)
 		if n.scratch == "" {
 			if ch := n.copying; ch != nil {
 				w.mu.Unlock()
+				if testHookCopyWait != nil {
+					testHookCopyWait()
+				}
 				<-ch
 				w.mu.Lock()
 				continue
@@ -771,6 +815,10 @@ func (w *Workspace) openWrite(name string, flag int, perm os.FileMode, limit int
 		return w.openNode(n, name, flag)
 	}
 }
+
+// testHookCopyWait, if set, is called when an opener starts waiting for
+// another's copy-up, without the lock. Tests use it to order events.
+var testHookCopyWait func()
 
 // create makes a new file for OpenFile with O_CREATE. A dangling
 // symbolic link at name is followed and its target created, as os does,
@@ -791,6 +839,9 @@ func (w *Workspace) create(name string, flag int, perm os.FileMode) (absfs.File,
 				return nil, pathErr("open", name, fs.ErrExist)
 			}
 			if hops >= MaxSymlinks {
+				// Unreachable while w.mu is held: walk followed this
+				// same chain within MaxSymlinks before create was
+				// called. Kept so the loop is bounded on its own.
 				return nil, pathErr("open", name, errLoop)
 			}
 			target := c.target()
@@ -810,7 +861,7 @@ func (w *Workspace) create(name string, flag int, perm os.FileMode) (absfs.File,
 		}
 		f.Close()
 		dir := w.materialize(phys)
-		n := &wnode{name: base, kind: kindFile, scratch: sp, dirty: true, entry: c4m.Entry{
+		n := &wnode{name: base, kind: kindFile, scratch: sp, dirty: true, noPerm: perm&chmodBits == 0, entry: c4m.Entry{
 			Mode:      perm & chmodBits,
 			Timestamp: w.now(),
 			Size:      -1,
@@ -1112,7 +1163,7 @@ func (w *Workspace) Rename(oldpath, newpath string) error {
 	odir, ndir := w.materialize(ophys), w.materialize(nphys)
 	n := src.w
 	if n == nil {
-		n = adopt(src.b, oname, odir)
+		n = w.adopt(src.b, oname, odir)
 	}
 	w.unlink(odir, oname, true)
 	if exists {
@@ -1173,33 +1224,43 @@ func (w *Workspace) change(op, name string, follow bool, set func(*wnode)) error
 }
 
 // Chmod changes the mode of name, following symbolic links. Only the
-// change is recorded; a file's content is not copied.
+// change is recorded; a file's content is not copied. A file's mode 0
+// is c4m's null mode: the workspace reports it as 0, but a captured
+// manifest, and a View or workspace made from it, reads it as 0644.
 func (w *Workspace) Chmod(name string, mode os.FileMode) error {
 	return w.change("chmod", name, true, func(n *wnode) {
 		typ := modeOf(n.entry.Mode, n.kind == kindDir, n.kind == kindLink) & fs.ModeType
 		n.entry.Mode = typ | mode&chmodBits
+		n.noPerm = n.kind == kindFile && mode&chmodBits == 0
 	})
 }
 
 // Chtimes changes the modification time of name, following symbolic
-// links. c4m records no access time, so atime is ignored.
+// links. c4m records no access time, so atime is ignored. A zero mtime
+// leaves the time as it is, as os.Chtimes does.
 func (w *Workspace) Chtimes(name string, atime, mtime time.Time) error {
+	if mtime.IsZero() {
+		return w.exists("chtimes", name, true)
+	}
 	return w.change("chtimes", name, true, func(n *wnode) { n.entry.Timestamp = mtime })
+}
+
+// exists checks that name resolves, for an operation that records
+// nothing.
+func (w *Workspace) exists(op, name string, follow bool) error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	_, _, err := w.walk(op, name, follow)
+	return err
 }
 
 // Chown checks that name exists and otherwise does nothing: c4m records
 // no ownership.
 func (w *Workspace) Chown(name string, uid, gid int) error {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	_, _, err := w.walk("chown", name, true)
-	return err
+	return w.exists("chown", name, true)
 }
 
 // Lchown is Chown without following a final symbolic link.
 func (w *Workspace) Lchown(name string, uid, gid int) error {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	_, _, err := w.walk("lchown", name, false)
-	return err
+	return w.exists("lchown", name, false)
 }

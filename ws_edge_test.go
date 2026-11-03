@@ -313,8 +313,10 @@ func TestCaptureEmptyBase(t *testing.T) {
 }
 
 // TestDiffNullDirectoryID: two directories with the same entry, whose
-// null C4 ID cannot tell their children apart, are patched by their
-// children, as c4m.PatchDiff does.
+// null C4 ID cannot tell their children apart. c4m.PatchDiff writes the
+// directory's entry unchanged, which c4m.ApplyPatch takes as removing
+// it and everything below; the capture's diff fills in the directory's
+// C4 ID instead, so the patch changes it and applies the children.
 func TestDiffNullDirectoryID(t *testing.T) {
 	v := mustNew(t, c4m.NewManifest(), nil)
 	dirEntry := &c4m.Entry{Name: "d/", Mode: fs.ModeDir | 0o755, Timestamp: c4m.NullTimestamp(), Size: -1}
@@ -333,8 +335,31 @@ func TestDiffNullDirectoryID(t *testing.T) {
 	for _, e := range patch.Entries {
 		got = append(got, e.Name)
 	}
-	if strings.Join(got, ",") != "d/,a,b" {
-		t.Errorf("patch = %v", got)
+	if strings.Join(got, ",") != "d/,a,b" || patch.Entries[0].C4ID.IsNil() {
+		t.Errorf("patch = %v, directory ID %s", got, patch.Entries[0].C4ID)
+	}
+	// Applied by c4m itself, it gives the new tree.
+	asManifest := func(kids ...string) *c4m.Manifest {
+		m := c4m.NewManifest()
+		d := *dirEntry
+		m.AddEntry(&d)
+		for _, k := range kids {
+			e := *file(k).entry
+			e.Depth = 1
+			m.AddEntry(&e)
+		}
+		return m
+	}
+	applied := c4m.ApplyPatch(asManifest("a", "same"), patch)
+	var names []string
+	for _, e := range applied.Entries {
+		names = append(names, e.Name)
+	}
+	if strings.Join(names, ",") != "d/,b,same" {
+		t.Errorf("applied = %v", names)
+	}
+	if id, _ := v.nodeID(nw.dir.kids[0]); applied.Entries[0].C4ID != id {
+		t.Errorf("applied directory ID %s, want its listing's %s", applied.Entries[0].C4ID, id)
 	}
 	// Identical children: nothing.
 	patch = c4m.NewManifest()

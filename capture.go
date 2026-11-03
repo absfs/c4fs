@@ -41,8 +41,9 @@ type Changeset struct {
 	// changed.
 	Patch *c4m.Manifest
 
-	// Files and Bytes count the files Capture hashed and put into the
-	// store, and their content.
+	// Files and Bytes count the files Capture hashed, and their content:
+	// the files written since the last capture. Each was put into the
+	// store unless the store had that content already.
 	Files int
 	Bytes int64
 
@@ -190,8 +191,10 @@ func (c *capturer) buildFile(n *wnode) (*node, error) {
 	if c.reuse(n, &e) {
 		return n.base, nil
 	}
-	if e.Size < 0 && n.scratch == "" && n.base != nil && !e.C4ID.IsNil() {
-		// A sequence member's size is not in its folded entry.
+	if e.Size < 0 && n.base != nil && !e.C4ID.IsNil() {
+		// A sequence member's size is not in its folded entry. The file
+		// is not dirty, so its content is still the View's, whether or
+		// not it was copied to scratch.
 		e.Size = c.w.v.size(n.base)
 	}
 	return &node{name: n.name, entry: &e}, nil
@@ -226,16 +229,19 @@ func (c *capturer) reuse(n *wnode, e *c4m.Entry) bool {
 	if !identical(e, b.entry) {
 		return false
 	}
-	if b.seq == nil {
-		return true
-	}
 	// A sequence member folds back into its sequence only where it
 	// came from.
+	return b.seq == nil || c.inPlace(n)
+}
+
+// inPlace reports whether n stands where its View node is in the View:
+// not moved, nor moved back.
+func (c *capturer) inPlace(n *wnode) bool {
 	if n.parent == nil || n.parent.base == nil {
 		return false
 	}
 	r, err := c.w.baseChild(n.parent.base, n.name)
-	return err == nil && r.b == b
+	return err == nil && r.b == n.base
 }
 
 // stamp is the time Capture records for n: the View's, if n still has
@@ -283,7 +289,13 @@ func (c *capturer) buildDir(n *wnode) (*node, error) {
 		return newRoot(kids), nil
 	}
 	if unchanged && n.name == n.base.name && n.entry.Mode == n.base.entry.Mode &&
-		n.entry.Timestamp.Equal(n.base.entry.Timestamp) {
+		n.entry.Timestamp.Equal(n.base.entry.Timestamp) &&
+		(!n.base.entry.C4ID.IsNil() || c.inPlace(n)) {
+		// A View directory whose C4 ID is null is reused only in its
+		// own place. Its entry does not identify its children, so moved
+		// over a directory with the same name, mode and time it would be
+		// an identical entry, which a patch takes as removal; rebuilt,
+		// it gets its C4 ID and patches as a change.
 		return n.base, nil
 	}
 	items := listItems(kids)
@@ -465,16 +477,28 @@ func (c *capturer) change(o, n item, depth int, patch *c4m.Manifest) error {
 		if !n.isDir() || !o.isDir() {
 			return nil
 		}
-		// The same entry, different children: possible only where
-		// the directory's C4 ID is null.
+		// The same entry, different children: possible only where the
+		// directory's C4 ID is null. Capture never builds such a pair
+		// (buildDir reuses a null-ID directory only in place), but in a
+		// patch an entry identical to the base's removes it, so if one
+		// arrives the directory is written with its C4 ID filled in: a
+		// change, which keeps the base's children and applies the ones
+		// that follow.
 		sub := c4m.NewManifest()
 		if err := c.diff(o.n, n.n, depth+1, sub); err != nil {
 			return err
 		}
-		if len(sub.Entries) > 0 {
-			emit(patch, n.e, depth)
-			patch.Entries = append(patch.Entries, sub.Entries...)
+		if len(sub.Entries) == 0 {
+			return nil
 		}
+		id, err := c.w.v.nodeID(n.n)
+		if err != nil {
+			return err
+		}
+		e := *n.e
+		e.C4ID = id
+		emit(patch, &e, depth)
+		patch.Entries = append(patch.Entries, sub.Entries...)
 		return nil
 	}
 	emit(patch, n.e, depth)
