@@ -22,6 +22,10 @@ import (
 // refused. Concurrent fills of one ID within a Cache share one download.
 // Share one Cache between the Views of a process; separate processes may
 // share a directory too, since every object is published atomically.
+//
+// A Cache never removes anything: it grows with every object hydrated
+// into it. Its owner decides its lifetime; delete the directory (when
+// no View is reading from it) to reclaim the space.
 type Cache struct {
 	ts      *store.TreeStore
 	mu      sync.Mutex

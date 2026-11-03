@@ -3,7 +3,11 @@
 All notable changes to c4fs are documented here. c4fs is pre-1.0, so minor
 versions may break its API.
 
-## [Unreleased]
+## [0.10.0] - Unreleased
+
+**Breaking:** the whole API changes. Nothing of v0.9.x's `FS` remains; see
+"Migrating from v0.9.x" in the README for what replaces each part. The next
+tag is v0.10.0, a minor bump, as c4fs is pre-1.0.
 
 A rewrite. c4fs is now a read-only view of a c4m manifest, and a
 writable workspace over it that captures its changes as c4m, built on
@@ -18,9 +22,13 @@ implementation is removed.
   Everything else is an in-memory change set: creations, removals with
   whiteouts, renames of files and whole directories in constant time,
   `Mkdir`, `Symlink`, `Chmod` and `Chtimes`. A View file is copied to
-  scratch on its first write-open, truncate or append; `O_TRUNC` copies
-  nothing, `Truncate` copies only what it keeps, and metadata changes copy
-  nothing. A directory removed and made again is opaque. `Remove` of a
+  scratch on its first open for writing (`O_WRONLY` or `O_RDWR`) or
+  truncate; `O_TRUNC` copies nothing, `Truncate` copies only what it keeps,
+  and metadata changes copy nothing. Read-only opens copy nothing, even with
+  `O_CREATE` or `O_APPEND`. Handles report current metadata from `Stat`, a
+  directory handle lists afresh after a rewind, negative offsets are
+  `EINVAL`, and a zero mtime in `Chtimes` leaves the time alone, all as
+  package os behaves. A directory removed and made again is opaque. `Remove` of a
   directory needs the merged directory to be empty. Passes absfs/fstesting's
   suites, and is safe for concurrent use.
 - `Workspace.Capture(store)`, which hashes only the files written since the
@@ -39,14 +47,14 @@ implementation is removed.
 - Tests that hold a capture to `c4 id`'s scan of the same changes made on
   disk, to `c4m.ApplyPatch`, and to the real `c4 log` and `c4 patch`; tests
   through absnfs's NFS operations behind switchfs; a concurrency test with
-  hundreds of interleaved captures; and benchmarks for capture over a
+  dozens of interleaved captures; and benchmarks for capture over a
   100,000-file base.
 - `View`, an `absfs.SymlinkFileSystem` over the tree a c4m manifest
   describes, opened with `New` (a `*c4m.Manifest`), `Open` (a C4 ID in any
   c4 `store.Source`) or `OpenConfigured` (the store the c4 CLI is configured
   to use).
 - A per-directory index from c4m's nested names: O(children) `ReadDir`,
-  O(depth) lookup, about 74 bytes per entry beyond the manifest.
+  O(depth · log fanout) lookup, about 74 bytes per entry beyond the manifest.
 - Lazy directories: a directory given by C4 ID alone loads its one-level
   record from the store on first visit, so a tree opened by its root record
   reads one object.
@@ -74,3 +82,5 @@ implementation is removed.
 - The old `FS`, `Layer`, tombstones, dehydrating files, garbage collection
   and its own store types, with the dependency on the c4 v0.8.2 pre-release,
   whose store layout did not match the 1.0 CLI's.
+
+[0.10.0]: https://github.com/absfs/c4fs/compare/v0.9.1...HEAD

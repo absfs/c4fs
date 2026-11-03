@@ -321,7 +321,11 @@ func (v *View) Sub(dir string) (fs.FS, error) {
 }
 
 // Chdir sets the directory relative names resolve against. It changes
-// no data, so unlike the mutating methods it succeeds.
+// no data, so unlike the mutating methods it succeeds. The working
+// directory is the View's own, shared by every user of the View
+// (workspaces, unionfs lowers, NFS goroutines): one caller's Chdir
+// changes how relative names resolve for all of them, so code that
+// shares a View should use absolute paths.
 func (v *View) Chdir(dir string) error {
 	n, err := v.lookup("chdir", dir, true)
 	if err != nil {

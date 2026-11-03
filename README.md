@@ -105,7 +105,7 @@ w.Chmod("/run.sh", 0o755)               // metadata only: nothing is copied
 
 cs, err := w.Capture(st)                // st: the c4 store.Store to put content in
 fmt.Println(cs.Base, "->", cs.ID)       // the c4m IDs before and after
-fmt.Println(cs.Files, "files stored")   // only what was written since the last capture
+fmt.Println(cs.Files, "files hashed")   // only what was written since the last capture
 cs.WriteTo(changeset)                   // base ID, patch entries, closing ID
 m, _ := cs.Manifest()                   // the whole new tree, if you need it
 nv := cs.View()                         // ... or a read-only View of it
@@ -123,7 +123,9 @@ head, _ := w.Head()                                 // the last captured ID
 
 `go run ./example <id>` lists a stored tree, `go run ./example <id> path`
 prints a file, and `go run ./example -w <id>` writes in a workspace and
-prints the captured changeset.
+prints the captured changeset. The `-w` mode puts the new file's content (a
+few bytes) into the c4 CLI's configured store, as `c4 id -s` would; the
+stored tree itself is untouched.
 
 ## Serving workspaces over NFS
 
@@ -161,9 +163,10 @@ Notes:
 
 - switchfs v1.0.0 does not apply a route's `Rewriter`, and has no symlink
   methods. Wrap it so that every path method asks the router for the backend
-  and the rewritten path, as the prototype does. `ws_nfs_test.go` has a
-  complete wrapper (`fullRouter`) and drives workspaces through absnfs's own
-  READ, WRITE, CREATE, REMOVE, RENAME, SYMLINK, READDIR and SETATTR code.
+  and the rewritten path, as the prototype does. The tests have a complete
+  wrapper: `router` in `union_test.go` together with `fullRouter` in
+  `ws_nfs_test.go`, which drives workspaces through absnfs's own READ,
+  WRITE, CREATE, REMOVE, RENAME, SYMLINK, READDIR and SETATTR code.
 - absnfs v1.1.0 needs the prototype's fixes before macOS lists directories
   (file IDs dropped in READDIRPLUS) and before files belong to the mounting
   user. Those are absnfs issues, not c4fs ones.
@@ -171,7 +174,8 @@ Notes:
   workspace makes that cheap: no hashing and no lock held during the write.
   The first write to a commit file copies it to scratch once.
 - Use a folder (basefs over osfs) for scratch on a server. memfs v1.1.0 is not
-  safe for a write and a stat of the same file at once.
+  safe for a write and a stat of the same file at once. basefs v1.0.0 takes a
+  Unix-style absolute path, so on Windows use another absfs for scratch.
 
 ## Workspace or unionfs?
 
@@ -213,7 +217,8 @@ subtree; its content is not stored again.
 
 **What you get.** A `Changeset` holds `Base` (the ID the patch applies to),
 `ID` (the captured tree's ID, `c4m.Manifest.ComputeC4ID` of it), `Patch`
-(the entries), and `Files`/`Bytes` (what was hashed). `Manifest()` returns
+(the entries), and `Files`/`Bytes` (what was hashed: the files written since
+the last capture, each stored unless the store had that content already). `Manifest()` returns
 the whole new tree and `View()` a read-only View of it. Both are computed on
 demand, so a caller that keeps only the patch never pays for them.
 
@@ -304,7 +309,10 @@ do not touch.
 inline, which is how the CLI stores directory records, loads its record the
 first time it is visited. Opening a large tree by its root record therefore
 reads one object. Content is fetched on first read, never on `Open`, `Stat`
-or `Close`.
+or `Close`, with one exception: `Size()` of a file whose c4m size is null
+reads the content to measure it (hydrating it from a streaming store), so a
+GETATTR or `ls -l` of such a file fetches it. If that content is missing,
+`Size()` reports 0 and a read reports `ErrContentMissing`.
 
 **Metadata from c4m.** Mode, time and size come from the entry, with c4m's
 null values handled as the standard defines them:
@@ -314,6 +322,7 @@ null values handled as the standard defines them:
 | mode      | `-`         | 0644 file, 0755 directory, 0777 symlink             |
 | timestamp | `-` or `0`  | the Unix epoch, c4m's internal value for null       |
 | size      | `-`         | measured from the content on first `Size()`, cached |
+|           |             | (0 if the content is missing)                       |
 | C4 ID     | `-`         | empty if the size is 0, otherwise reads `ErrNoID`   |
 
 `FileInfo.Sys()` returns the `*c4m.Entry`, so callers can read C4 IDs.
@@ -349,32 +358,36 @@ resolve against the link's directory, absolute targets against the root.
 **Concurrency.** A View is safe for any number of goroutines, as an NFS
 server needs, and a file's `ReadAt` calls run in parallel. A Workspace is
 safe for concurrent use: a copy-up does not hold the lock, and concurrent
-openers of the same file share one copy.
+openers of the same file share one copy. A workspace handle describes what
+it was opened on as it is now: `Stat` on it shows a later `Chmod` or write,
+and a directory handle lists afresh after a rewind (`Seek(0, io.SeekStart)`),
+while one pass of a listing stays a consistent snapshot.
 
 ## Performance
 
 Apple M3 Max, Go 1.27.3, `go test -bench .`. The base is a synthetic tree of
 100,000 files in 1,100 directories (100 directories of 10 subdirectories of
-100 files), with every directory's size and C4 ID filled in, as `c4 id`
-writes them.
+100 files). The View rows use it as a hand-written manifest might give it,
+with each directory's size and C4 ID null; the Workspace rows use it with
+every directory's size and C4 ID filled in, as `c4 id` writes them.
 
 | View                                   | Time   | Allocations |
 | -------------------------------------- | ------ | ----------- |
-| build the index (`New`)                | 5.6 ms | 112k        |
-| `Stat` of a file three levels down     | 300 ns | 6           |
-| `ReadDir` of a 100-entry directory     | 1.4 µs | 105         |
-| `ReadDir` of a 100,000-entry directory | 1.1 ms | 100k        |
+| build the index (`New`)                | 5.2 ms | 112k        |
+| `Stat` of a file three levels down     | 293 ns | 6           |
+| `ReadDir` of a 100-entry directory     | 1.3 µs | 105         |
+| `ReadDir` of a 100,000-entry directory | 1.0 ms | 100k        |
 
 | Workspace over the 100,000-file base                          | Time    |
 | ------------------------------------------------------------- | ------- |
-| first `Capture` of 1,000 rewritten 1 KiB files, RAM store     | 162 ms  |
-| the same into a `TreeStore` (no fsync)                        | 186 ms  |
-| next `Capture`, 10 more files rewritten                       | 0.41 ms |
-| `Changeset.Manifest()`: the whole 101,100-entry manifest      | 6.0 ms  |
-| `Resume` / `View.Apply` of the 1,000-file changeset           | 6.9 ms  |
+| first `Capture` of 1,000 rewritten 1 KiB files, RAM store     | 155 ms  |
+| the same into a `TreeStore` (no fsync)                        | 163 ms  |
+| next `Capture`, 10 more files rewritten                       | 0.40 ms |
+| `Changeset.Manifest()`: the whole 101,100-entry manifest      | 5.2 ms  |
+| `Resume` / `View.Apply` of the 1,000-file changeset           | 6.5 ms  |
 | `Stat` of a commit file, 1,000 changes elsewhere              | 264 ns  |
-| one NFS WRITE (open, 32 KiB `WriteAt`, close), folder scratch | 27 µs   |
-| create, write 1 KiB and close a new file, folder scratch      | 110 µs  |
+| one NFS WRITE (open, 32 KiB `WriteAt`, close), folder scratch | 28 µs   |
+| create, write 1 KiB and close a new file, folder scratch      | 164 µs  |
 
 The capture benchmark is a near worst case. It rewrites one file in each of
 1,000 different directories, so 1,100 directories of 100 entries each get
@@ -402,8 +415,13 @@ shows.
 Missing content is deliberately not `fs.ErrNotExist`: the file exists, its
 bytes do not. A store error that is not an absence (a timeout, say) passes
 through unchanged. A workspace reports what `os` would: `EEXIST`, `ENOENT`,
-`ENOTDIR`, `EISDIR`, `ENOTEMPTY`, `EINVAL`, `ELOOP`, `EBADF`, and `EBUSY` for
-the root.
+`ENOTDIR`, `EISDIR`, `ENOTEMPTY`, `EINVAL` (a negative offset, say),
+`ELOOP`, `EBADF`, and `EBUSY` for the root.
+
+Filesystem methods wrap these in an `*fs.PathError` (`*os.LinkError` for
+`Rename` and `Symlink`) naming the path, the workspace path rather than a
+scratch file. `Open`, `OpenConfigured`, `New`, `View.Apply`, `Resume` and
+`Capture` only add context, such as the C4 ID. Test with `errors.Is`.
 
 ## Testing
 
@@ -428,14 +446,17 @@ the root.
   exactly the captured ID;
 - workspaces driven through absnfs's NFS operations behind switchfs routing,
   two workspaces sharing one View;
-- writers, readers, directory renames, a shared copy-up and hundreds of
+- writers, readers, directory renames, a shared copy-up and dozens of
   captures running at once, after which the chain of changesets must apply in
   order and resume to exactly the workspace;
+- a copy-up held open while the file is removed or renamed and a second
+  opener waits on it, in a fixed order, so the unlocked copy path is pinned;
 - sequences that stay folded, unfold when a member changes, and fold again
   when it is put back; null directory metadata; missing directory records;
   failing stores and scratch filesystems.
 
-Statement coverage is 97.6% for the package.
+Statement coverage is 97.7% for the package and 90.8% for the example
+command.
 
 ## Caveats
 
@@ -448,17 +469,30 @@ Statement coverage is 97.6% for the package.
   hydrated content is verified against its ID, and `ErrSizeMismatch` guards
   the rest cheaply.
 - A sequence's members share the folded entry's mode and time.
+- `Chdir` sets the View's own working directory, shared by every user of the
+  View (workspaces, unionfs lowers, NFS goroutines). Code that shares a View
+  should use absolute paths.
+- A `Cache`, `DefaultCacheDir()`'s included, is never pruned: it grows with
+  everything hydrated into it. Its owner decides its lifetime; delete the
+  directory, when no View is reading from it, to reclaim the space.
 
 **Workspace**
 
 - A read-only handle on a commit file that has not been copied to scratch
   keeps reading the commit's content if the file is then written through
-  another handle, as with overlayfs. Handles on changed files share their
-  scratch file and see each other's writes.
+  another handle, as with overlayfs; its `Stat` does show the new size and
+  metadata. Handles on changed files share their scratch file and see each
+  other's writes.
+- A directory handle opened before its directory was removed keeps listing
+  what it listed, rather than nothing.
 - Hard links are not supported (absfs has no `Link`). A commit file that
   carries a c4m hard-link mark loses it when its content changes.
 - `Chown` and `Lchown` change nothing: c4m records no ownership. `Chtimes`
-  sets the modification time; c4m records no access time.
+  sets the modification time; c4m records no access time. A zero mtime leaves
+  the time unchanged, as `os.Chtimes` does.
+- A file's mode 0 (from `Chmod` or a create with `perm` 0) is c4m's null
+  mode. The workspace reports `----------`, but the captured manifest records
+  `-`, which a View, or a workspace resumed from it, reads as 0644.
 - A symbolic link made in a workspace is captured with a null C4 ID. `c4 id`
   would record its target's ID instead.
 - The root directory's own mode and time are not captured: c4m has no entry
@@ -474,7 +508,13 @@ Statement coverage is 97.6% for the package.
   truncated to zero or replaced.
 - memfs v1.1.0 makes a fine scratch for tests and single-threaded use, but it
   is not safe for concurrent writes and stats of one file. It also panics on
-  a negative `Truncate`, which the workspace refuses before it gets there.
+  a negative `Truncate`, `ReadAt` or `WriteAt` offset, which the workspace
+  refuses with `EINVAL` before it gets there.
+- Folder scratch through basefs v1.0.0 works on Unix only: basefs takes a
+  Unix-style absolute path, which Windows refuses. Use memfs or another absfs
+  for scratch on Windows.
+- `Base()` of a resumed workspace is the View `Resume` built (the base with
+  the chain applied). Keep the original base to resume the whole chain again.
 - c4fs is pre-1.0; its API may still change.
 
 ## Migrating from v0.9.x
@@ -495,6 +535,13 @@ names were flat paths, and its store layout differed from the 1.0 CLI's.
 | `FS.Flatten()`                            | `Changeset.Manifest()`                                        |
 | `FS.ReferencedIDs()`                      | the C4 IDs of `View.Manifest()`                               |
 | `StoreAdapter` over the c4 v0.8.2 store   | any c4 v1 `store.Source`, the CLI's own store included        |
+| `FS.Store()`                              | the `store.Source` you passed in                              |
+| `FS.Base()`                               | `View.Manifest()`, or `Workspace.Base()` for the View          |
+| `FS.WriteFile(name, data, perm)`          | `Workspace.Create` or `OpenFile`, then `Write` and `Close`    |
+| `FS.ReadLink(name)`                       | `Readlink(name)`, on a View or a Workspace                     |
+| `FS.Exists`, `IsDir`, `IsFile`, `Size`    | `Stat(name)`: its error, `IsDir()`, `Mode().IsRegular()`, `Size()` |
+| `FS.Glob(pattern)`                        | `fs.Glob` over `View.Sub("/")` or `Workspace.Sub("/")`          |
+| the `FileSystem` and `File` interfaces    | `absfs.SymlinkFileSystem` and `absfs.File`                     |
 
 Snapshot existing trees with the 1.0 CLI (`c4 id -s`) and open them by the ID
 it prints.

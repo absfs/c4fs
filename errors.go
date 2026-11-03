@@ -7,8 +7,11 @@ import (
 	"syscall"
 )
 
-// Errors reported by a View. They are wrapped in an *fs.PathError naming
-// the path and operation, so test them with errors.Is.
+// Errors reported by the package. Filesystem methods (Stat, Open, Read
+// and the rest) wrap them in an *fs.PathError naming the path and the
+// operation. Open, OpenConfigured, New, View.Apply, Resume and Capture
+// only add context (the C4 ID, say), so do not expect an *fs.PathError
+// from them. Test for these errors with errors.Is.
 var (
 	// ErrContentMissing reports that a file's C4 ID is not in the store
 	// (or no store was given). The file still lists and stats; only its
@@ -43,9 +46,11 @@ var (
 	ErrInvalidManifest = errors.New("c4fs: invalid manifest")
 )
 
-// ErrReadOnly is the error every mutating method wraps: syscall.EROFS,
-// "read-only file system". It is defined on every platform absfs builds
-// for, Windows included (where Go defines it as an invented errno).
+// ErrReadOnly is the error a View's mutating methods wrap when no more
+// specific error (EEXIST, ENOENT, ENOTDIR, EISDIR) applies:
+// syscall.EROFS, "read-only file system". It is defined on every
+// platform absfs builds for, Windows included (where Go defines it as
+// an invented errno).
 var ErrReadOnly error = syscall.EROFS
 
 // errClosed is the os package's own sentinel, so callers checking
