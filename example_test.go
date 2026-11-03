@@ -129,3 +129,75 @@ func ExampleView_ReadDir() {
 	// b.txt false
 	// c true
 }
+
+// A workspace over a View: write, remove, then capture the change as a
+// c4m patch, with the new content put into the store.
+func ExampleWorkspace_Capture() {
+	dir, _ := os.MkdirTemp("", "c4store")
+	defer os.RemoveAll(dir)
+	s, _ := store.NewTreeStore(dir)
+	id, _ := s.Put(strings.NewReader("hello, world\n"))
+	m, _ := c4m.Unmarshal([]byte(
+		"drwxr-xr-x 2025-01-01T00:00:00Z 13 docs/ -\n" +
+			"  -rw-r--r-- 2025-01-01T00:00:00Z 13 hello.txt " + id.String() + "\n"))
+	v, _ := c4fs.New(m, s)
+
+	scratch, _ := memfs.NewFS()
+	w, err := c4fs.NewWorkspace(v, scratch)
+	if err != nil {
+		log.Fatal(err)
+	}
+	f, _ := w.Create("/docs/notes.txt")
+	f.Write([]byte("notes\n"))
+	f.Close()
+	w.Remove("/docs/hello.txt")
+
+	cs, err := w.Capture(s)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(cs.Files, "file stored")
+	for _, e := range cs.Patch.Entries {
+		fmt.Println(strings.Repeat("  ", e.Depth) + e.Name)
+	}
+	// cs.WriteTo(file) writes it as c4 diff does; the View is unchanged.
+	_, err = v.Stat("/docs/notes.txt")
+	fmt.Println(err != nil)
+	// Output:
+	// 1 file stored
+	// docs/
+	//   hello.txt
+	//   notes.txt
+	// true
+}
+
+// Resume rebuilds a workspace from its base and the changesets captured
+// since, with their content from the store.
+func ExampleResume() {
+	dir, _ := os.MkdirTemp("", "c4store")
+	defer os.RemoveAll(dir)
+	s, _ := store.NewTreeStore(dir)
+	base, _ := c4fs.New(c4m.NewManifest(), s)
+
+	scratch, _ := memfs.NewFS()
+	w, _ := c4fs.NewWorkspace(base, scratch)
+	f, _ := w.Create("/result.txt")
+	f.Write([]byte("42\n"))
+	f.Close()
+	cs, _ := w.Capture(s)
+	var chain strings.Builder
+	cs.WriteTo(&chain)
+
+	again, _ := memfs.NewFS()
+	r, err := c4fs.Resume(base, strings.NewReader(chain.String()), s, again)
+	if err != nil {
+		log.Fatal(err)
+	}
+	b, _ := r.ReadFile("/result.txt")
+	head, _ := r.Head()
+	fmt.Print(string(b))
+	fmt.Println(head == cs.ID)
+	// Output:
+	// 42
+	// true
+}

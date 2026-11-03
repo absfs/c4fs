@@ -9,6 +9,7 @@ import (
 
 	"github.com/Avalanche-io/c4/c4m"
 	"github.com/Avalanche-io/c4/store"
+	"github.com/absfs/c4fs"
 )
 
 // TestModes runs the command's three modes over a small stored tree.
@@ -39,5 +40,25 @@ func TestModes(t *testing.T) {
 		flag.CommandLine = flag.NewFlagSet("example", flag.ExitOnError)
 		os.Args = append([]string{"example"}, args...)
 		main()
+	}
+}
+
+// TestErrors covers the helpers' failures: a missing directory to list,
+// a file that cannot be created, and a store that cannot take content.
+func TestErrors(t *testing.T) {
+	v, err := c4fs.New(c4m.NewManifest(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := list(v, "/missing"); err == nil {
+		t.Error("listed a missing directory")
+	}
+	if err := write(v, "/x", "x"); err == nil {
+		t.Error("wrote to a read-only view")
+	}
+	t.Setenv("C4_STORE", "")
+	t.Setenv("HOME", t.TempDir())
+	if err := demoWorkspace(v); err == nil {
+		t.Error("captured without a store")
 	}
 }

@@ -5,7 +5,7 @@
 //	c4 id -s mytree/                  # prints "stored: c4..."
 //	go run ./example c4...            # list the whole tree
 //	go run ./example c4... src/main.go  # print one file
-//	go run ./example -w c4...         # write through a workspace union
+//	go run ./example -w c4...         # write in a workspace and capture
 //
 // The store is the one the c4 CLI uses: C4_STORE, or ~/.c4/config.
 package main
@@ -20,14 +20,14 @@ import (
 
 	"github.com/Avalanche-io/c4"
 	"github.com/Avalanche-io/c4/c4m"
+	"github.com/Avalanche-io/c4/store"
 	"github.com/absfs/absfs"
 	"github.com/absfs/c4fs"
 	"github.com/absfs/memfs"
-	"github.com/absfs/unionfs"
 )
 
 func main() {
-	workspace := flag.Bool("w", false, "write a file through a unionfs workspace over the view")
+	workspace := flag.Bool("w", false, "write a file in a workspace over the view, then capture it")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: example [-w] <c4 id> [path]")
 		flag.PrintDefaults()
@@ -94,24 +94,34 @@ func list(v *c4fs.View, dir string) error {
 	return nil
 }
 
-// demoWorkspace layers a writable in-memory upper over the view, as an
-// agent workspace does, writes one file, and shows the view unchanged.
+// demoWorkspace makes a writable workspace over the view, as an agent
+// gets, writes one file, and captures the change into the same store:
+// it prints the changeset, which c4 log and c4 patch read, and shows
+// the view itself unchanged.
 func demoWorkspace(v *c4fs.View) error {
-	upper, err := memfs.NewFS()
+	scratch, err := memfs.NewFS()
 	if err != nil {
 		return err
 	}
-	ws := unionfs.New(unionfs.WithWritableLayer(upper), unionfs.WithReadOnlyLayer(v)).SymlinkFileSystem()
-	if err := write(ws, "/NOTES.txt", "written in the workspace\n"); err != nil {
-		return err
-	}
-	ents, err := ws.ReadDir("/")
+	w, err := c4fs.NewWorkspace(v, scratch)
 	if err != nil {
 		return err
 	}
-	fmt.Println("workspace:")
-	for _, e := range ents {
-		fmt.Println("  ", e.Name())
+	defer w.Close()
+	if err := write(w, "/NOTES.txt", "written in the workspace\n"); err != nil {
+		return err
+	}
+	st, err := store.OpenStore()
+	if err != nil {
+		return err
+	}
+	cs, err := w.Capture(st)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("captured %s: %d file(s), %d bytes stored\n", cs.ID, cs.Files, cs.Bytes)
+	if _, err := cs.WriteTo(os.Stdout); err != nil {
+		return err
 	}
 	if _, err := v.Stat("/NOTES.txt"); err != nil {
 		fmt.Println("view: NOTES.txt absent, as it should be")
