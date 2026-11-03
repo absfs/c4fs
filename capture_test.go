@@ -243,7 +243,9 @@ func TestCaptureMatchesScan(t *testing.T) {
 			return nil
 		}
 		wsOps{t, w}.chtimes(rel, when)
-		if runtime.GOOS == "windows" {
+		// Chmod follows symbolic links and there is no Lchmod: a link's
+		// own mode is fixed, and chmodding it would change its target.
+		if runtime.GOOS == "windows" && info.Mode()&os.ModeSymlink == 0 {
 			// Windows keeps no Unix permission bits, only a read-only
 			// attribute: files scan as -rw-rw-rw- or -r--r--r--, and
 			// directories as drwxrwxrwx, whatever mode they were made

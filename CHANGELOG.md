@@ -72,6 +72,15 @@ implementation is removed.
 - Errors: `ErrReadOnly` (EROFS), `ErrContentMissing`, `ErrNoID`,
   `ErrIDMismatch`, `ErrSizeMismatch`, `ErrNoStore`, `ErrNotManifest`,
   `ErrInvalidManifest`.
+- A path through a file is `ENOTDIR` on every platform, and `RemoveAll` of
+  one fails, on Windows too, where that `ENOTDIR` also satisfies
+  `os.IsNotExist`. A test runs every operation through a file on a View and a
+  Workspace with `ENOTDIR` behaving as Windows' does, on every OS.
+- `MkdirAll` reports what `os.MkdirAll` does, held to it on the host by a
+  test: a Workspace's gives `EEXIST` for a link that exists but leads to no
+  directory (a loop, or a path through a file), and a View's gives `ENOTDIR`
+  through a file, `EEXIST` for such a link, and `EROFS` naming the first
+  directory it would make.
 - Tests against `testing/fstest`, absfs/fstesting, unionfs and switchfs, and
   the real c4 CLI when installed; benchmarks on a 100,000-entry manifest.
 - An example command that lists and reads a stored tree, and with `-w`

@@ -601,7 +601,8 @@ func TestWorkspaceMkdir(t *testing.T) {
 	wantErr(t, "mkdirall through a file", w.MkdirAll("/README.md/x", 0o755), syscall.ENOTDIR)
 	wantErr(t, "mkdirall empty", w.MkdirAll("", 0o755), fs.ErrNotExist)
 	w.Symlink("loop", "/loop")
-	wantErr(t, "mkdirall through a loop", w.MkdirAll("/loop/x", 0o755), syscall.ELOOP)
+	// The loop exists, so os.MkdirAll's Mkdir of it reports EEXIST.
+	wantErr(t, "mkdirall through a loop", w.MkdirAll("/loop/x", 0o755), fs.ErrExist)
 	if err := w.RemoveAll("/d"); err != nil {
 		t.Fatal(err)
 	}

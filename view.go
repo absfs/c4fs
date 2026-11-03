@@ -384,16 +384,39 @@ func (v *View) Mkdir(name string, perm os.FileMode) error {
 }
 
 // MkdirAll succeeds if name is already a directory, as os.MkdirAll does,
-// and otherwise fails.
+// and otherwise fails with what os.MkdirAll would report on a read-only
+// mount: ENOTDIR for a file or a path through one, EEXIST for a name
+// that exists but does not resolve to a directory (a dangling link,
+// say), and ErrReadOnly only where it would create a directory.
 func (v *View) MkdirAll(name string, perm os.FileMode) error {
+	// os.MkdirAll's own steps: a fast path for a name that resolves,
+	// then the parent, then Mkdir of the name itself.
 	n, err := v.lookup("mkdir", name, true)
-	switch {
-	case err == nil && n.dir != nil:
-		return nil
-	case err == nil:
+	if err == nil {
+		if n.dir != nil {
+			return nil
+		}
 		return pathErr("mkdir", name, errNotDir)
 	}
-	return pathErr("mkdir", name, ErrReadOnly)
+	if parent := parentPath(name); parent != "" {
+		if err := v.MkdirAll(parent, perm); err != nil {
+			return err
+		}
+	}
+	return v.Mkdir(name, perm)
+}
+
+// parentPath is name less its last element and the separators before
+// it, as os.MkdirAll finds a parent: "" when there is none to make.
+func parentPath(name string) string {
+	i := len(name) - 1
+	for i >= 0 && name[i] == '/' {
+		i--
+	}
+	for i >= 0 && name[i] != '/' {
+		i--
+	}
+	return name[:max(i, 0)]
 }
 
 // Remove fails.

@@ -98,7 +98,9 @@ func snapshot(t testing.TB, dir string, st store.Store, sequences bool) (*c4m.Ma
 			for i, n := range names {
 				ids[i] = putFile(t, st, filepath.Join(dir, strings.Join(stack, ""), n))
 			}
-			putBytes(t, st, c4m.IDListBytes(ids))
+			if id := putBytes(t, st, idListBytes(ids)); id != e.C4ID {
+				t.Fatalf("ID list for %s stored as %s, entry says %s", e.Name, id, e.C4ID)
+			}
 			continue
 		}
 		putFile(t, st, filepath.Join(dir, filepath.FromSlash(rel)))
@@ -151,6 +153,16 @@ func putBytes(t testing.TB, st store.Store, b []byte) c4.ID {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// idListBytes is a sequence's ID list as c4 stores it: its members' C4
+// IDs, 90 characters each, concatenated with no separator.
+func idListBytes(ids []c4.ID) []byte {
+	b := make([]byte, 0, 90*len(ids))
+	for _, id := range ids {
+		b = append(b, id.String()...)
+	}
+	return b
 }
 
 func idOf(s string) c4.ID { return c4.Identify(strings.NewReader(s)) }

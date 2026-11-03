@@ -79,7 +79,12 @@
 // ErrReadOnly (syscall.EROFS), or with the more specific error a
 // read-only mount gives: EEXIST, ENOENT, ENOTDIR or EISDIR. MkdirAll of
 // an existing directory and RemoveAll of a missing name succeed, as in
-// package os.
+// package os. MkdirAll otherwise reports what os.MkdirAll would on a
+// read-only mount: ENOTDIR for a file or a path through one, EEXIST for
+// a name that exists but does not lead to a directory (a dangling
+// link), and ErrReadOnly, naming the first directory it would make,
+// only where it would make one. A Workspace's MkdirAll follows
+// os.MkdirAll the same way.
 //
 // # Workspaces
 //
@@ -160,4 +165,13 @@
 // OpenConfigured, New, View.Apply, Resume) and Capture add context to
 // the package's errors but promise no *fs.PathError. Test for causes
 // with errors.Is either way.
+//
+// A path through a file ("/README.md/x") is syscall.ENOTDIR on every
+// platform, and RemoveAll of one fails rather than succeeding as for a
+// missing name. On Windows, though, Go defines syscall.ENOTDIR as
+// ERROR_PATH_NOT_FOUND, so that same error also satisfies
+// os.IsNotExist and errors.Is(err, fs.ErrNotExist). A caller that
+// ignores not-exist errors (as code around RemoveAll often does) will
+// treat a path through a file as missing there; test for
+// syscall.ENOTDIR first where the difference matters.
 package c4fs

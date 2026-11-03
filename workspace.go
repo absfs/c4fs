@@ -1030,9 +1030,9 @@ func (w *Workspace) MkdirAll(name string, perm os.FileMode) error {
 			}
 			continue
 		}
-		if !notExist(err) {
-			return err
-		}
+		// Absent, or unresolvable (a link to a path through a file, a
+		// loop): os.MkdirAll then tries Mkdir and reports its error,
+		// EEXIST for a link that is there but leads nowhere usable.
 		if err := w.mkdir(cur, perm); err != nil {
 			return err
 		}

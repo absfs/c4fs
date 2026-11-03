@@ -349,7 +349,12 @@ without allocating, and checks both against c4's own code.
 **Read-only View.** Every mutating method of a View fails with an
 `*fs.PathError` wrapping `ErrReadOnly` (`syscall.EROFS`), or with the more
 specific error a read-only mount gives: `EEXIST`, `ENOENT`, `ENOTDIR`,
-`EISDIR`.
+`EISDIR`. `MkdirAll` of an existing directory succeeds; otherwise it reports
+what `os.MkdirAll` would on a read-only mount: `ENOTDIR` for a file or a path
+through one, `EEXIST` for a name that exists but does not lead to a directory
+(a dangling link), and `EROFS`, naming the first directory it would make, only
+where it would make one. A workspace's `MkdirAll` follows `os.MkdirAll` the
+same way.
 
 **Symlinks.** `Lstat` and `Readlink` see links; `Stat`, `Open` and `ReadDir`
 follow them, through up to `MaxSymlinks` (40) links. Relative targets
@@ -423,6 +428,14 @@ Filesystem methods wrap these in an `*fs.PathError` (`*os.LinkError` for
 scratch file. `Open`, `OpenConfigured`, `New`, `View.Apply`, `Resume` and
 `Capture` only add context, such as the C4 ID. Test with `errors.Is`.
 
+A path through a file (`/README.md/x`) is `syscall.ENOTDIR` on every platform,
+and `RemoveAll` of one fails rather than succeeding as for a missing name. On
+Windows, though, Go defines `syscall.ENOTDIR` as `ERROR_PATH_NOT_FOUND`, so the
+same error also satisfies `os.IsNotExist` and `errors.Is(err, fs.ErrNotExist)`.
+A caller that ignores not-exist errors, as code around `RemoveAll` often does,
+will treat a path through a file as missing there. Test for `syscall.ENOTDIR`
+first where the difference matters.
+
 ## Testing
 
 `go test -race ./...` covers, among the rest:
@@ -453,9 +466,14 @@ scratch file. `Open`, `OpenConfigured`, `New`, `View.Apply`, `Resume` and
   opener waits on it, in a fixed order, so the unlocked copy path is pinned;
 - sequences that stay folded, unfold when a member changes, and fold again
   when it is put back; null directory metadata; missing directory records;
-  failing stores and scratch filesystems.
+  failing stores and scratch filesystems;
+- every operation on a path through a file, on a View and a workspace, with
+  `ENOTDIR` made to match `fs.ErrNotExist` as Windows' does, so every OS
+  checks that none succeeds as though the name were missing; and `MkdirAll`
+  held to `os.MkdirAll` on the host over files, links, dangling links, loops
+  and links through files.
 
-Statement coverage is 97.7% for the package and 90.8% for the example
+Statement coverage is 97.8% for the package and 90.8% for the example
 command.
 
 ## Caveats
