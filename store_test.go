@@ -79,6 +79,16 @@ func TestMissingRecord(t *testing.T) {
 	if _, err := v.Stat("/src/lib"); err != nil {
 		t.Errorf("the directory itself still stats: %v", err)
 	}
+	// Whether a name is free there cannot be known, so Mkdir and
+	// MkdirAll report the missing record, not EROFS.
+	for _, name := range []string{"/src/lib/new", "/src/lib/new/deeper"} {
+		if err := v.Mkdir(name, 0o755); !errors.Is(err, ErrContentMissing) {
+			t.Errorf("Mkdir(%s) = %v", name, err)
+		}
+		if err := v.MkdirAll(name, 0o755); !errors.Is(err, ErrContentMissing) {
+			t.Errorf("MkdirAll(%s) = %v", name, err)
+		}
+	}
 	// A failed load is retried: put the record back and it heals.
 	storeRecord(t, f.st, f.m, lib)
 	if got := names(t, v, "/src/lib"); len(got) != 3 {

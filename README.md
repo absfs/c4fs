@@ -319,11 +319,15 @@ null values handled as the standard defines them:
 
 | Field     | Null in c4m | The View reports                                    |
 | --------- | ----------- | --------------------------------------------------- |
-| mode      | `-`         | 0644 file, 0755 directory, 0777 symlink             |
+| mode      | `-`         | 0644 file, 0755 directory, 0777 symlink (1)         |
 | timestamp | `-` or `0`  | the Unix epoch, c4m's internal value for null       |
 | size      | `-`         | measured from the content on first `Size()`, cached |
 |           |             | (0 if the content is missing)                       |
 | C4 ID     | `-`         | empty if the size is 0, otherwise reads `ErrNoID`   |
+
+(1) In c4 v1.0.21 `----------` also decodes as the null mode. Later c4
+releases decode it as a known zero mode (`c4m.ZeroMode`, bit 18 of the
+mode); c4fs reports that as 0 and never passes the bit on in `Mode()`.
 
 `FileInfo.Sys()` returns the `*c4m.Entry`, so callers can read C4 IDs.
 `View.ID()` is the tree's own C4 ID as c4 computes it, resolving null
@@ -350,11 +354,13 @@ without allocating, and checks both against c4's own code.
 `*fs.PathError` wrapping `ErrReadOnly` (`syscall.EROFS`), or with the more
 specific error a read-only mount gives: `EEXIST`, `ENOENT`, `ENOTDIR`,
 `EISDIR`. `MkdirAll` of an existing directory succeeds; otherwise it reports
-what `os.MkdirAll` would on a read-only mount: `ENOTDIR` for a file or a path
-through one, `EEXIST` for a name that exists but does not lead to a directory
-(a dangling link), and `EROFS`, naming the first directory it would make, only
-where it would make one. A workspace's `MkdirAll` follows `os.MkdirAll` the
-same way.
+what `os.MkdirAll` would on a read-only mount: `ENOTDIR` for a file, a link
+to one or a path through one; `EEXIST` for a link that cannot be followed
+(dangling, a loop, or a link to a path through a file); and `EROFS`, naming
+the first directory it would make, only where it would make one. Where a
+directory record is missing from the store, `Mkdir` and `MkdirAll` report
+`ErrContentMissing`. A workspace's `MkdirAll` follows `os.MkdirAll` the same
+way, and both name the path as given, unclean or not, as `os` does.
 
 **Symlinks.** `Lstat` and `Readlink` see links; `Stat`, `Open` and `ReadDir`
 follow them, through up to `MaxSymlinks` (40) links. Relative targets

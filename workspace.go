@@ -1007,7 +1007,11 @@ func (w *Workspace) mkdir(name string, perm os.FileMode) error {
 	return nil
 }
 
-// MkdirAll creates name and any missing parents, as os.MkdirAll does.
+// MkdirAll creates name and any missing parents, as os.MkdirAll does,
+// and reports what it would: ENOTDIR for a file, a link to one or a
+// path through one; EEXIST for a link that cannot be followed
+// (dangling, a loop, or a link to a path through a file). Errors name
+// the path as given, or the parent of it that failed.
 func (w *Workspace) MkdirAll(name string, perm os.FileMode) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1017,27 +1021,34 @@ func (w *Workspace) MkdirAll(name string, perm os.FileMode) error {
 	if name == "" {
 		return pathErr("mkdir", name, fs.ErrNotExist)
 	}
-	cur := "/"
-	for _, elem := range strings.Split(strings.TrimPrefix(w.abs(name), "/"), "/") {
-		if elem == "" {
-			continue
+	return w.mkdirAll(name, perm)
+}
+
+// mkdirAll takes os.MkdirAll's steps: a fast path for a name that
+// resolves, then the parent, then mkdir of the name itself, whose error
+// it reports. The caller holds w.mu.
+func (w *Workspace) mkdirAll(name string, perm os.FileMode) error {
+	r, _, err := w.walk("mkdir", name, true)
+	if err == nil {
+		if r.isDir() {
+			return nil
 		}
-		cur = path.Join(cur, elem)
-		r, _, err := w.walk("mkdir", cur, true)
-		if err == nil {
-			if !r.isDir() {
-				return pathErr("mkdir", cur, errNotDir)
-			}
-			continue
-		}
-		// Absent, or unresolvable (a link to a path through a file, a
-		// loop): os.MkdirAll then tries Mkdir and reports its error,
-		// EEXIST for a link that is there but leads nowhere usable.
-		if err := w.mkdir(cur, perm); err != nil {
+		return pathErr("mkdir", name, errNotDir)
+	}
+	if parent := parentPath(name); parent != "" {
+		if err := w.mkdirAll(parent, perm); err != nil {
 			return err
 		}
 	}
-	return nil
+	err = w.mkdir(name, perm)
+	if err != nil {
+		// A name like "new/.": mkdir finds it made, as os.MkdirAll's
+		// Lstat does.
+		if r, _, lerr := w.walk("mkdir", name, false); lerr == nil && r.isDir() {
+			return nil
+		}
+	}
+	return err
 }
 
 // Remove removes the file, symbolic link or empty directory name. A

@@ -207,9 +207,15 @@ func TestNullValues(t *testing.T) {
 	if got := mustRead(t, v, "/nullfile"); got != body {
 		t.Errorf("read = %q", got)
 	}
-	// "----------" decodes to c4m's null mode too.
-	if fi, _ := v.Stat("/zeromode"); fi.Mode() != 0o644 {
-		t.Errorf("zero mode = %v", fi.Mode())
+	// "----------" is c4m's null mode in c4 v1.0.21, reported as 0644,
+	// and its known zero mode (c4m.ZeroMode) in later releases, reported
+	// as 0.
+	want := fs.FileMode(0o644)
+	if m.GetEntry("zeromode").Mode&zeroMode != 0 {
+		want = 0
+	}
+	if fi, _ := v.Stat("/zeromode"); fi.Mode() != want {
+		t.Errorf("zero mode = %v, want %v", fi.Mode(), want)
 	}
 	if fi, _ := v.Stat("/nullid"); fi.Size() != 0 {
 		t.Errorf("null id size = %d", fi.Size())
@@ -390,5 +396,42 @@ func TestRelativePathsAndChdir(t *testing.T) {
 	}
 	if _, err := v.Stat("/../../src"); err != nil {
 		t.Errorf("above root = %v", err)
+	}
+}
+
+// TestZeroMode checks c4m's known zero mode, the bit c4 releases after
+// v1.0.21 set for "----------": it is mode 0, not the null mode, and the
+// bit itself, which no os.FileMode uses, never reaches a FileInfo.
+func TestZeroMode(t *testing.T) {
+	st := newTreeStore(t)
+	m := parse(t, strings.Join([]string{
+		"-rw-r--r-- 2025-01-01T00:00:00Z 0 f -",
+		"drwxr-xr-x 2025-01-01T00:00:00Z 0 d/",
+		"lrwxrwxrwx 2025-01-01T00:00:00Z 0 l -> f -",
+		"",
+	}, "\n"))
+	for _, e := range m.Entries {
+		e.Mode = zeroMode | e.Mode&fs.ModeType
+	}
+	v, err := New(m, st, WithCache(newTestCache(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]fs.FileMode{"/f": 0, "/d": fs.ModeDir, "/l": fs.ModeSymlink}
+	for name, mode := range want {
+		fi, err := v.Lstat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode() != mode {
+			t.Errorf("View %s = %v (%#o), want %v", name, fi.Mode(), uint32(fi.Mode()), mode)
+		}
+		wfi, err := newWS(t, v).Lstat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wfi.Mode() != mode {
+			t.Errorf("Workspace %s = %v (%#o), want %v", name, wfi.Mode(), uint32(wfi.Mode()), mode)
+		}
 	}
 }

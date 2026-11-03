@@ -66,7 +66,9 @@
 //
 // Mode, time and size come from the c4m entry. c4m's null values are
 // handled as the standard defines them: a null mode becomes 0644 for a
-// file, 0755 for a directory and 0777 for a symbolic link; a null time is
+// file, 0755 for a directory and 0777 for a symbolic link (c4 releases
+// after v1.0.21 decode "----------" as a known zero mode, reported as 0);
+// a null time is
 // the Unix epoch, c4m's internal value for it; a null file size is
 // measured from the content when first asked for. FileInfo.Sys returns
 // the *c4m.Entry, so callers can read C4 IDs. View.ID returns the tree's
@@ -80,11 +82,13 @@
 // read-only mount gives: EEXIST, ENOENT, ENOTDIR or EISDIR. MkdirAll of
 // an existing directory and RemoveAll of a missing name succeed, as in
 // package os. MkdirAll otherwise reports what os.MkdirAll would on a
-// read-only mount: ENOTDIR for a file or a path through one, EEXIST for
-// a name that exists but does not lead to a directory (a dangling
-// link), and ErrReadOnly, naming the first directory it would make,
-// only where it would make one. A Workspace's MkdirAll follows
-// os.MkdirAll the same way.
+// read-only mount: ENOTDIR for a file, a link to one or a path through
+// one; EEXIST for a link that cannot be followed (dangling, a loop, or a
+// link to a path through a file); and ErrReadOnly, naming the first
+// directory it would make, only where it would make one. Where a
+// directory record is missing from the store, Mkdir and MkdirAll report
+// that. A Workspace's MkdirAll follows os.MkdirAll the same way, and
+// both name the path as given, unclean or not, as os does.
 //
 // # Workspaces
 //

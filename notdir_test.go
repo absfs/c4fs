@@ -179,6 +179,12 @@ var mkdirAllPaths = []string{
 	"/src/main.go/x", "/new/a/b", "/emptydir/a", "/link", "/link/x",
 	"/dirlink", "/dirlink/new", "/dangling", "/dangling/x", "/loop",
 	"/loop/x", "/through", "/through/x",
+	// Unclean names, whose errors name the path as given. Names that
+	// reach a file or link with a trailing slash ("/README.md/", or
+	// "/README.md//x", whose parent is "/README.md/") are left out:
+	// mkdir("file/") is ENOTDIR on macOS and EEXIST on Linux.
+	"//src//main.go/x", "//src//main.go/x/y", "/src//new", "/src/",
+	"/src/.", "/new/.", "/new//a/",
 }
 
 // errSummary is the cause and path of err, comparable across the host
@@ -232,12 +238,13 @@ func TestMkdirAllMatchesOS(t *testing.T) {
 			writeTree(t, dir, mkdirAllTree)
 			// The first missing directory, which os.MkdirAll makes first.
 			first := ""
-			for p := name; p != "/"; p = filepath.Dir(p) {
-				if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
+			for p := name; p != ""; p = parentPath(p) {
+				if _, err := os.Stat(dir + p); err != nil {
 					first = p
 				}
 			}
-			host := errSummary(os.MkdirAll(filepath.Join(dir, filepath.FromSlash(name)), 0o755), dir)
+			// Not filepath.Join, which would clean the name.
+			host := errSummary(os.MkdirAll(dir+name, 0o755), dir)
 			if got := errSummary(newWS(t, v).MkdirAll(name, 0o755), ""); got != host {
 				t.Errorf("Workspace.MkdirAll = %s, os.MkdirAll = %s", got, host)
 			}

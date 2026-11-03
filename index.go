@@ -75,21 +75,29 @@ func (n *node) mode() fs.FileMode {
 	return modeOf(n.entry.Mode, n.dir != nil, n.isSymlink())
 }
 
+// zeroMode is the bit c4 releases after v1.0.21 set for a known zero
+// mode (c4m.ZeroMode, written "----------"), to tell it from the null
+// mode. No os.FileMode bit uses it, so it is never reported.
+const zeroMode fs.FileMode = 1 << 18
+
 // modeOf presents a c4m mode, replacing c4m's null mode (0) with a
-// default and making the type bits agree with what the name is.
+// default and making the type bits agree with what the name is. A known
+// zero mode is reported as 0, with the type bits.
 func modeOf(m fs.FileMode, dir, link bool) fs.FileMode {
+	null := m == 0
+	m &^= zeroMode
 	switch {
 	case dir:
-		if m == 0 {
+		if null {
 			return fs.ModeDir | 0o755
 		}
 		return m&^fs.ModeType | fs.ModeDir
 	case link:
-		if m == 0 {
+		if null {
 			return fs.ModeSymlink | 0o777
 		}
 		return m&^fs.ModeType | fs.ModeSymlink
-	case m == 0:
+	case null:
 		return 0o644
 	}
 	return m

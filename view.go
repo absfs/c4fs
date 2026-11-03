@@ -375,19 +375,26 @@ func (v *View) denyCreate(op, name string) error {
 	return pathErr(op, name, ErrReadOnly)
 }
 
-// Mkdir fails: EEXIST if name exists, ErrReadOnly otherwise.
+// Mkdir fails: EEXIST if name exists, ErrReadOnly otherwise. A lookup
+// that fails for want of a directory record (ErrContentMissing, say)
+// reports that, since whether name exists is then unknown.
 func (v *View) Mkdir(name string, perm os.FileMode) error {
-	if _, err := v.lookup("mkdir", name, false); err == nil {
+	_, err := v.lookup("mkdir", name, false)
+	switch {
+	case err == nil:
 		return pathErr("mkdir", name, fs.ErrExist)
+	case !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, errNotDir):
+		return err
 	}
 	return v.denyCreate("mkdir", name)
 }
 
 // MkdirAll succeeds if name is already a directory, as os.MkdirAll does,
 // and otherwise fails with what os.MkdirAll would report on a read-only
-// mount: ENOTDIR for a file or a path through one, EEXIST for a name
-// that exists but does not resolve to a directory (a dangling link,
-// say), and ErrReadOnly only where it would create a directory.
+// mount: ENOTDIR for a file, a link to one or a path through one;
+// EEXIST for a link that cannot be followed (dangling, a loop, or a
+// link to a path through a file); and ErrReadOnly only where it would
+// create a directory. A missing directory record is reported as such.
 func (v *View) MkdirAll(name string, perm os.FileMode) error {
 	// os.MkdirAll's own steps: a fast path for a name that resolves,
 	// then the parent, then Mkdir of the name itself.

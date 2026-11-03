@@ -77,10 +77,14 @@ implementation is removed.
   `os.IsNotExist`. A test runs every operation through a file on a View and a
   Workspace with `ENOTDIR` behaving as Windows' does, on every OS.
 - `MkdirAll` reports what `os.MkdirAll` does, held to it on the host by a
-  test: a Workspace's gives `EEXIST` for a link that exists but leads to no
-  directory (a loop, or a path through a file), and a View's gives `ENOTDIR`
-  through a file, `EEXIST` for such a link, and `EROFS` naming the first
-  directory it would make.
+  test: `ENOTDIR` for a file, a link to one or a path through one, and
+  `EEXIST` for a link that cannot be followed (dangling, a loop, or a link
+  to a path through a file); a View's gives `EROFS` naming the first
+  directory it would make. Both name the path as given, unclean or not. A
+  View's `Mkdir` and `MkdirAll` report a missing directory record as
+  `ErrContentMissing`, not `EROFS`.
+- A known zero mode (`c4m.ZeroMode` in c4 releases after v1.0.21, written
+  `----------`) is reported as mode 0; its bit 18 never reaches `Mode()`.
 - Tests against `testing/fstest`, absfs/fstesting, unionfs and switchfs, and
   the real c4 CLI when installed; benchmarks on a 100,000-entry manifest.
 - An example command that lists and reads a stored tree, and with `-w`
