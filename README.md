@@ -272,9 +272,9 @@ Reading content, in order of preference:
 3. Anything else (S3, say) is hydrated into a `Cache`, verified against its
    C4 ID, then read locally. A `Cache` is itself a c4 TreeStore. It
    publishes each object by atomic rename and shares one download among
-   concurrent readers of an ID, which wait for the fill to return before
-   opening the object (on Windows the publishing rename holds it open
-   until then). Pass one with `WithCache` to share it between
+   concurrent readers of an ID. Readers wait for the fill to return before
+   opening the object; on Windows the rename that publishes it holds the
+   file open while it runs. Pass one with `WithCache` to share it between
    Views; otherwise a process-wide cache in `DefaultCacheDir()` is created
    the first time it is needed.
 

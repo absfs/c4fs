@@ -37,15 +37,25 @@ func openShared(p string) (*os.File, error) {
 	return os.NewFile(uintptr(h), p), nil
 }
 
-// longPath gives an absolute path past the classic MAX_PATH limit the
-// \\?\ prefix os.Open would add for it.
+// longPath gives a path whose absolute form reaches the classic
+// MAX_PATH limit the extended-length prefix os.Open would add for it:
+// \\?\ for a drive path and \\?\UNC\ for a network share. It measures
+// the absolute form, so a short relative path under a deep working
+// directory is prefixed too. A path already in extended-length or
+// device form is left alone.
 func longPath(p string) string {
-	if len(p) < 248 || strings.HasPrefix(p, `\\`) {
+	if strings.HasPrefix(p, `\\?\`) || strings.HasPrefix(p, `\??\`) || strings.HasPrefix(p, `\\.\`) {
+		return p
+	}
+	if filepath.IsAbs(p) && len(p) < 248 {
 		return p
 	}
 	abs, err := filepath.Abs(p)
-	if err != nil {
+	if err != nil || len(abs) < 248 {
 		return p
+	}
+	if strings.HasPrefix(abs, `\\`) {
+		return `\\?\UNC\` + abs[2:]
 	}
 	return `\\?\` + abs
 }

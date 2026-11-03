@@ -21,7 +21,8 @@ import (
 // so a reader never sees a partial object and a damaged download is
 // refused. Concurrent fills of one ID within a Cache share one download,
 // and no reader opens the object until its fill has returned (on Windows
-// the publishing rename holds the file open until then, refusing opens).
+// the rename that publishes it holds the file open while it runs,
+// refusing opens).
 // Share one Cache between the Views of a process; separate processes may
 // share a directory too, since every object is published atomically.
 //
@@ -108,13 +109,19 @@ func (c *Cache) Has(id c4.ID) bool {
 // on Windows the rename that publishes it holds the file open, and an
 // open in that window fails with a sharing violation. A caller that
 // finds nothing falls back to fill, which waits for the flight.
+//
+// The lookup runs before the flight check and outside the lock: a name
+// an in-flight fill has made visible is still hidden, since the flight
+// is released only after the fill's Put has returned.
 func (c *Cache) path(id c4.ID) (string, bool) {
+	p, ok := c.ts.ContentPath(id)
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.flights[id]; ok {
+	_, busy := c.flights[id]
+	c.mu.Unlock()
+	if busy {
 		return "", false
 	}
-	return c.ts.ContentPath(id)
+	return p, ok
 }
 
 // fill hydrates id from the reader open returns, and returns the cached

@@ -214,3 +214,86 @@ func TestOpenLocalRetriesSharingViolation(t *testing.T) {
 		t.Error("an ordinary error classified as a sharing violation")
 	}
 }
+
+// TestCacheSplitMovesFilledObject checks that a read survives its
+// object moving between the fill returning its path and the open: a
+// fill of another ID pushes the cache's leaf directory over its split
+// threshold, and the TreeStore moves every object into a subdirectory.
+func TestCacheSplitMovesFilledObject(t *testing.T) {
+	ram := store.NewRAM()
+	m := c4m.NewManifest()
+	body := []byte("the object that moves")
+	id := putBytes(t, ram, body)
+	m.AddEntry(&c4m.Entry{Name: "f0", Mode: 0o644, Size: int64(len(body)), Timestamp: c4m.NullTimestamp(), C4ID: id})
+	cache := newTestCache(t)
+	cache.ts.SetSplitThreshold(2)
+	cs := newCounting(ram)
+	v, err := New(m, streamOnly{cs}, WithCache(cache))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.filled = func(got c4.ID) {
+		if got != id {
+			return
+		}
+		// What a concurrent reader of other objects does: fill
+		// enough of them to split the leaf f0 was published in.
+		for i := 0; i < 3; i++ {
+			b := fmt.Sprintf("other %d", i)
+			if _, err := cache.fill(idOf(b), opener(bytes.NewReader([]byte(b)))); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	if got := mustRead(t, v, "/f0"); got != string(body) {
+		t.Errorf("read %q", got)
+	}
+	if p, ok := cache.ts.ContentPath(id); !ok || filepath.Dir(p) == filepath.Clean(cache.Dir()) {
+		t.Errorf("object at %q %v: the split did not move it", p, ok)
+	}
+	if n := cs.count(id); n != 1 {
+		t.Errorf("source opened %d times, want 1", n)
+	}
+}
+
+// TestCacheObjectRemovedAfterFill checks the other way a filled path
+// goes stale: the object is removed (the cache cleaned) before it is
+// opened. The read fills again from the store, and reports the content
+// missing when the store has lost it too.
+func TestCacheObjectRemovedAfterFill(t *testing.T) {
+	for _, lost := range []bool{false, true} {
+		ram := store.NewRAM()
+		m := c4m.NewManifest()
+		body := []byte("removed after its fill")
+		id := putBytes(t, ram, body)
+		m.AddEntry(&c4m.Entry{Name: "f", Mode: 0o644, Size: int64(len(body)), Timestamp: c4m.NullTimestamp(), C4ID: id})
+		cache := newTestCache(t)
+		cs := newCounting(ram)
+		v, err := New(m, streamOnly{cs}, WithCache(cache))
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed := false
+		cache.filled = func(got c4.ID) {
+			if removed {
+				return
+			}
+			removed = true
+			if err := cache.ts.Remove(got); err != nil {
+				t.Error(err)
+			}
+			if lost {
+				ram.Remove(got)
+			}
+		}
+		b, err := v.ReadFile("/f")
+		switch {
+		case lost && !errors.Is(err, ErrContentMissing):
+			t.Errorf("store lost it too: read = %q %v, want ErrContentMissing", b, err)
+		case !lost && (err != nil || string(b) != string(body)):
+			t.Errorf("refilled read = %q %v", b, err)
+		case !lost && cs.count(id) != 2:
+			t.Errorf("source opened %d times, want 2", cs.count(id))
+		}
+	}
+}

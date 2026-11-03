@@ -106,12 +106,26 @@ func (v *View) openContent(n *node) (*content, error) {
 		return nil, err
 	}
 	c, err := openLocal(p)
+	// The path a fill returns can be stale by the time it is opened: a
+	// fill of another ID can split the cache's leaf directory, moving
+	// every object in it. Look again; a fill of a cached ID only
+	// resolves its current path.
+	for i := 0; i < hydrateRetries && errors.Is(err, fs.ErrNotExist); i++ {
+		if p, err = v.hydrate(id, nil); err != nil {
+			return nil, err
+		}
+		c, err = openLocal(p)
+	}
 	if err != nil {
 		return nil, err
 	}
 	v.remember(n, p, c.size)
 	return v.checkSize(n, c)
 }
+
+// hydrateRetries bounds how often openContent looks for a hydrated
+// object again after it moved before it could be opened.
+const hydrateRetries = 3
 
 // hydrate fills the cache with id, from rc if the caller already opened
 // it and from the store otherwise.
@@ -152,9 +166,10 @@ const openRetries = 12
 
 // openLocal opens a local object file for random access. On Windows the
 // file is opened sharing delete access as well as read and write, so a
-// rename publishing it (by this process or another sharing the
-// directory) neither refuses the open nor is refused by it; a sharing
-// violation that still occurs, from some other holder of the file, is
+// rename moving or publishing it (by this process or another sharing
+// the directory) does not refuse the open while it runs, and the file
+// can be moved or removed while open; Windows still refuses a rename
+// that replaces an open file. A sharing violation that does occur is
 // retried with a bounded backoff.
 func openLocal(p string) (*content, error) {
 	f, err := openFile(p)

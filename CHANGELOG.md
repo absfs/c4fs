@@ -72,7 +72,11 @@ implementation is removed.
   local objects are also opened sharing delete access, so a rename moving
   the file (by another process, say) does not refuse the open, and a move
   or removal of an open file is not refused by it; any remaining sharing
-  violation is retried with a bounded backoff. A stress test emulates the Windows window on every OS.
+  violation is retried with a bounded backoff. A stress test emulates the
+  Windows window on every OS. A hydrated object moved by a cache directory
+  split before it could be opened is looked up again instead of failing
+  the read with "not found", and long relative and UNC paths open on
+  Windows as through `os.Open`.
 - c4m null modes, times and sizes handled per the standard; `FileInfo.Sys`
   returns the `*c4m.Entry`.
 - Symlinks: `Lstat`, `Readlink`, and following with a 40-link limit.
