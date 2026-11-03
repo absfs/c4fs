@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"time"
 
 	"github.com/Avalanche-io/c4"
 	"github.com/Avalanche-io/c4/c4m"
@@ -139,8 +140,29 @@ func (v *View) hydrate(id c4.ID, rc io.ReadCloser) (string, error) {
 	return cache.fill(id, open)
 }
 
+// Seams for openLocal: the per-OS open and sharing-violation test.
+var (
+	openFile         = openShared
+	sharingViolation = isSharingViolation
+)
+
+// openRetries bounds how often openLocal retries a sharing violation;
+// with the backoff below it waits at most about 0.6s in all.
+const openRetries = 12
+
+// openLocal opens a local object file for random access. On Windows the
+// file is opened sharing delete access as well as read and write, so a
+// rename publishing it (by this process or another sharing the
+// directory) neither refuses the open nor is refused by it; a sharing
+// violation that still occurs, from some other holder of the file, is
+// retried with a bounded backoff.
 func openLocal(p string) (*content, error) {
-	f, err := os.Open(p)
+	f, err := openFile(p)
+	for i, delay := 0, time.Millisecond; err != nil && i < openRetries && sharingViolation(err); i++ {
+		time.Sleep(delay)
+		delay = min(2*delay, 100*time.Millisecond)
+		f, err = openFile(p)
+	}
 	if err != nil {
 		return nil, err
 	}

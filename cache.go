@@ -19,7 +19,9 @@ import (
 // CLI writes, so it can also be listed as a c4 store. Content is written
 // to a temporary file, verified against its C4 ID, and renamed into place,
 // so a reader never sees a partial object and a damaged download is
-// refused. Concurrent fills of one ID within a Cache share one download.
+// refused. Concurrent fills of one ID within a Cache share one download,
+// and no reader opens the object until its fill has returned (on Windows
+// the publishing rename holds the file open until then, refusing opens).
 // Share one Cache between the Views of a process; separate processes may
 // share a directory too, since every object is published atomically.
 //
@@ -30,6 +32,9 @@ type Cache struct {
 	ts      *store.TreeStore
 	mu      sync.Mutex
 	flights map[c4.ID]*flight
+	// filled, when set, runs after a fill has written its object and
+	// before the flight is released: a test seam for the publish window.
+	filled func(id c4.ID)
 }
 
 type flight struct {
@@ -91,14 +96,24 @@ func sharedDefault(create bool) (*Cache, error) {
 // Dir returns the cache's root directory.
 func (c *Cache) Dir() string { return c.ts.Root() }
 
-// Has reports whether the cache holds content for id.
+// Has reports whether the cache holds content for id. Content whose
+// fill is still in flight is not held yet.
 func (c *Cache) Has(id c4.ID) bool {
-	_, ok := c.ts.ContentPath(id)
+	_, ok := c.path(id)
 	return ok
 }
 
-// path returns the local file holding id's content.
+// path returns the local file holding id's content. It reports nothing
+// while a fill of id is in flight, even once the object's name exists:
+// on Windows the rename that publishes it holds the file open, and an
+// open in that window fails with a sharing violation. A caller that
+// finds nothing falls back to fill, which waits for the flight.
 func (c *Cache) path(id c4.ID) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.flights[id]; ok {
+		return "", false
+	}
 	return c.ts.ContentPath(id)
 }
 
@@ -107,14 +122,16 @@ func (c *Cache) path(id c4.ID) (string, bool) {
 // flight, open is not called.
 func (c *Cache) fill(id c4.ID, open func() (io.ReadCloser, error)) (string, error) {
 	c.mu.Lock()
-	if p, ok := c.ts.ContentPath(id); ok {
-		c.mu.Unlock()
-		return p, nil
-	}
+	// The flight comes first: its object may already be renamed into
+	// place, but it is not released until the fill has returned.
 	if f, ok := c.flights[id]; ok {
 		c.mu.Unlock()
 		<-f.done
 		return f.path, f.err
+	}
+	if p, ok := c.ts.ContentPath(id); ok {
+		c.mu.Unlock()
+		return p, nil
 	}
 	f := &flight{done: make(chan struct{})}
 	c.flights[id] = f
@@ -124,6 +141,9 @@ func (c *Cache) fill(id c4.ID, open func() (io.ReadCloser, error)) (string, erro
 		f.err = err
 	} else {
 		f.path, f.err = c.put(id, rc)
+	}
+	if c.filled != nil {
+		c.filled(id)
 	}
 
 	c.mu.Lock()
