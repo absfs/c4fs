@@ -54,10 +54,13 @@ var errClosed = os.ErrClosed
 
 // The syscall errors are used where an *os.File would report the same.
 var (
-	errNotDir  error = syscall.ENOTDIR
-	errIsDir   error = syscall.EISDIR
-	errInvalid error = syscall.EINVAL
-	errLoop    error = syscall.ELOOP
+	errNotDir   error = syscall.ENOTDIR
+	errIsDir    error = syscall.EISDIR
+	errInvalid  error = syscall.EINVAL
+	errLoop     error = syscall.ELOOP
+	errBusy     error = syscall.EBUSY
+	errNotEmpty error = syscall.ENOTEMPTY
+	errBadFD    error = syscall.EBADF
 )
 
 func pathErr(op, name string, err error) error {
