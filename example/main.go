@@ -7,14 +7,17 @@
 //	go run ./example c4... src/main.go  # print one file
 //	go run ./example -w c4...         # write in a workspace and capture
 //
-// The store is the one the c4 CLI uses: C4_STORE, or ~/.c4/config.
+// The store is the one the c4 CLI uses: C4_STORE, or ~/.c4/config. The
+// -w mode writes to it: the captured content of NOTES.txt, a few bytes,
+// is put into that store, as c4 id -s would put it. Nothing else is
+// changed, and the stored tree itself is never modified.
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path"
 
@@ -26,50 +29,69 @@ import (
 	"github.com/absfs/memfs"
 )
 
+// errUsage reports bad arguments, after the usage has been printed.
+var errUsage = errors.New("usage")
+
 func main() {
-	workspace := flag.Bool("w", false, "write a file in a workspace over the view, then capture it")
-	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: example [-w] <c4 id> [path]")
-		flag.PrintDefaults()
+	os.Exit(exitCode(run(os.Args[1:], os.Stdout, os.Stderr), os.Stderr))
+}
+
+// exitCode reports err and returns the command's exit status: 0, 1 for
+// a failure, 2 for bad arguments (whose usage run has printed).
+func exitCode(err error, stderr io.Writer) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, errUsage):
+		return 2
 	}
-	flag.Parse()
-	if flag.NArg() < 1 {
-		flag.Usage()
-		os.Exit(2)
+	fmt.Fprintln(stderr, "example:", err)
+	return 1
+}
+
+// run is the command, writing what it prints to stdout and its usage to
+// stderr.
+func run(args []string, stdout, stderr io.Writer) error {
+	fl := flag.NewFlagSet("example", flag.ContinueOnError)
+	fl.SetOutput(stderr)
+	workspace := fl.Bool("w", false, "write a file in a workspace over the view, then capture it into the c4 store")
+	fl.Usage = func() {
+		fmt.Fprintln(stderr, "usage: example [-w] <c4 id> [path]")
+		fl.PrintDefaults()
 	}
-	id, err := c4.Parse(flag.Arg(0))
+	if err := fl.Parse(args); err != nil {
+		return errUsage
+	}
+	if fl.NArg() < 1 {
+		fl.Usage()
+		return errUsage
+	}
+	id, err := c4.Parse(fl.Arg(0))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	v, err := c4fs.OpenConfigured(id)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-
 	switch {
 	case *workspace:
-		if err := demoWorkspace(v); err != nil {
-			log.Fatal(err)
-		}
-	case flag.NArg() > 1:
-		f, err := v.Open("/" + flag.Arg(1))
+		return demoWorkspace(stdout, v)
+	case fl.NArg() > 1:
+		f, err := v.Open("/" + fl.Arg(1))
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		defer f.Close()
-		if _, err := io.Copy(os.Stdout, f); err != nil {
-			log.Fatal(err)
-		}
-	default:
-		if err := list(v, "/"); err != nil {
-			log.Fatal(err)
-		}
+		_, err = io.Copy(stdout, f)
+		return err
 	}
+	return list(stdout, v, "/")
 }
 
 // list prints every name under dir with its mode, size and the start of
 // its C4 ID. Directories stored as records load as the walk reaches them.
-func list(v *c4fs.View, dir string) error {
+func list(out io.Writer, v *c4fs.View, dir string) error {
 	ents, err := v.ReadDir(dir)
 	if err != nil {
 		return err
@@ -84,9 +106,9 @@ func list(v *c4fs.View, dir string) error {
 		if ent, ok := info.Sys().(*c4m.Entry); ok && !ent.C4ID.IsNil() {
 			id = ent.C4ID.String()[:12]
 		}
-		fmt.Printf("%v %10d %-12s %s\n", info.Mode(), info.Size(), id, p)
+		fmt.Fprintf(out, "%v %10d %-12s %s\n", info.Mode(), info.Size(), id, p)
 		if e.IsDir() {
-			if err := list(v, p); err != nil {
+			if err := list(out, v, p); err != nil {
 				return err
 			}
 		}
@@ -95,10 +117,10 @@ func list(v *c4fs.View, dir string) error {
 }
 
 // demoWorkspace makes a writable workspace over the view, as an agent
-// gets, writes one file, and captures the change into the same store:
-// it prints the changeset, which c4 log and c4 patch read, and shows
-// the view itself unchanged.
-func demoWorkspace(v *c4fs.View) error {
+// gets, writes one file, and captures the change into the c4 CLI's
+// store: it prints the changeset, which c4 log and c4 patch read, and
+// shows the view itself unchanged.
+func demoWorkspace(out io.Writer, v *c4fs.View) error {
 	scratch, err := memfs.NewFS()
 	if err != nil {
 		return err
@@ -119,12 +141,12 @@ func demoWorkspace(v *c4fs.View) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("captured %s: %d file(s), %d bytes stored\n", cs.ID, cs.Files, cs.Bytes)
-	if _, err := cs.WriteTo(os.Stdout); err != nil {
+	fmt.Fprintf(out, "captured %s: %d file(s), %d bytes hashed\n", cs.ID, cs.Files, cs.Bytes)
+	if _, err := cs.WriteTo(out); err != nil {
 		return err
 	}
 	if _, err := v.Stat("/NOTES.txt"); err != nil {
-		fmt.Println("view: NOTES.txt absent, as it should be")
+		fmt.Fprintln(out, "view: NOTES.txt absent, as it should be")
 	}
 	return nil
 }
