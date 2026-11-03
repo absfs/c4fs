@@ -5,18 +5,48 @@ versions may break its API.
 
 ## [Unreleased]
 
-A rewrite. c4fs is now a read-only view of a c4m manifest, built on
+A rewrite. c4fs is now a read-only view of a c4m manifest, and a
+writable workspace over it that captures its changes as c4m, built on
 github.com/Avalanche-io/c4 v1.0.21 and absfs v1.0.0. The previous
 implementation is removed.
 
 ### Added
 
+- `Workspace`, a writable `absfs.SymlinkFileSystem` over a `View`, made with
+  `NewWorkspace(view, scratch)`. Written content lives in a caller-supplied
+  scratch filesystem (a basefs folder or memfs), one file per written file.
+  Everything else is an in-memory change set: creations, removals with
+  whiteouts, renames of files and whole directories in constant time,
+  `Mkdir`, `Symlink`, `Chmod` and `Chtimes`. A View file is copied to
+  scratch on its first write-open, truncate or append; `O_TRUNC` copies
+  nothing, `Truncate` copies only what it keeps, and metadata changes copy
+  nothing. A directory removed and made again is opaque. `Remove` of a
+  directory needs the merged directory to be empty. Passes absfs/fstesting's
+  suites, and is safe for concurrent use.
+- `Workspace.Capture(store)`, which hashes only the files written since the
+  last capture (no hashing on write or close), puts them into the store,
+  identifies the changed directories as `c4 id` does, and returns a
+  `Changeset`: the patch against the previous state (`Base`, `ID`, `Patch`,
+  `WriteTo` in `c4 diff`'s format, which `c4 log` and `c4 patch` read), plus
+  the new tree on demand (`Manifest`, `View`). Successive captures form a
+  patch chain; `Workspace.Head` reports where the next one applies.
+- `Resume(base, changesets, store, scratch)`, which rebuilds a workspace from
+  its base and its chain of changesets, and `View.Apply`, which applies a
+  chain to a View, checking base and closing IDs (`ErrBaseMismatch`,
+  `ErrIDMismatch`).
+- `View.ID`, the tree's C4 ID as `c4m.Manifest.ComputeC4ID` computes it, and
+  `View.Manifest`, the whole tree as a manifest with sequences folded.
+- Tests that hold a capture to `c4 id`'s scan of the same changes made on
+  disk, to `c4m.ApplyPatch`, and to the real `c4 log` and `c4 patch`; tests
+  through absnfs's NFS operations behind switchfs; a concurrency test with
+  hundreds of interleaved captures; and benchmarks for capture over a
+  100,000-file base.
 - `View`, an `absfs.SymlinkFileSystem` over the tree a c4m manifest
   describes, opened with `New` (a `*c4m.Manifest`), `Open` (a C4 ID in any
   c4 `store.Source`) or `OpenConfigured` (the store the c4 CLI is configured
   to use).
 - A per-directory index from c4m's nested names: O(children) `ReadDir`,
-  O(depth) lookup, about 58 bytes per entry beyond the manifest.
+  O(depth) lookup, about 74 bytes per entry beyond the manifest.
 - Lazy directories: a directory given by C4 ID alone loads its one-level
   record from the store on first visit, so a tree opened by its root record
   reads one object.
@@ -36,6 +66,8 @@ implementation is removed.
   `ErrInvalidManifest`.
 - Tests against `testing/fstest`, absfs/fstesting, unionfs and switchfs, and
   the real c4 CLI when installed; benchmarks on a 100,000-entry manifest.
+- An example command that lists and reads a stored tree, and with `-w`
+  writes in a `Workspace` and prints the captured changeset.
 
 ### Removed
 
