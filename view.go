@@ -33,6 +33,8 @@ type View struct {
 	// streams is set once the store's Open is seen to return a reader
 	// without random access, after which first reads hydrate directly.
 	streams atomic.Bool
+
+	id atomic.Pointer[c4.ID] // the tree's c4m ID, once computed
 }
 
 var _ absfs.SymlinkFileSystem = (*View)(nil)
@@ -108,10 +110,13 @@ func newView(src store.Source, opts []Option) *View {
 	return v
 }
 
-// setRoot makes the root directory. Its size and time follow c4m's
+// setRoot makes the root directory from its children.
+func (v *View) setRoot(kids []*node) { v.root = newRoot(kids) }
+
+// newRoot makes a root directory node. Its size and time follow c4m's
 // nil-infectious rule over the top-level entries: the sum and the
 // latest, unless any of them is null.
-func (v *View) setRoot(kids []*node) {
+func newRoot(kids []*node) *node {
 	e := &c4m.Entry{Name: "/", Mode: fs.ModeDir | 0o755, Timestamp: c4m.NullTimestamp()}
 	var size int64
 	var latest time.Time
@@ -134,8 +139,16 @@ func (v *View) setRoot(kids []*node) {
 	if !nullTime && len(kids) > 0 {
 		e.Timestamp = latest
 	}
-	v.root = &node{entry: e, dir: &dirState{kids: kids}}
-	v.root.dir.loaded.Store(true)
+	return &node{entry: e, dir: loadedDir(kids)}
+}
+
+// derive returns a View of the tree at root that reads content from
+// src and shares v's cache.
+func (v *View) derive(root *node, src store.Source) *View {
+	nv := newView(src, nil)
+	nv.cache = v.cache
+	nv.root = root
+	return nv
 }
 
 func (v *View) cacheFor(create bool) (*Cache, error) {

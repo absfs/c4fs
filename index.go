@@ -29,6 +29,12 @@ type node struct {
 	dir   *dirState  // non-nil for directories
 	seq   *c4m.Entry // for a sequence member, the folded entry it came from
 	memo  atomic.Pointer[memo]
+
+	// canon is a directory's entry with null size and time resolved
+	// from its children, as c4m canonicalises them for identity; line
+	// is the canonical entry and its c4m line, once formatted.
+	canon atomic.Pointer[c4m.Entry]
+	line  atomic.Pointer[canonical]
 }
 
 // memo caches what a node's content resolution learned.
@@ -46,6 +52,8 @@ type dirState struct {
 	loaded atomic.Bool
 	kids   []*node // sorted by name, unique; immutable once loaded
 	record c4.ID   // directory record to load from while !loaded
+
+	items atomic.Pointer[[]item] // kids as c4m lists them, once sorted
 }
 
 func newNode(e *c4m.Entry) *node {
@@ -64,14 +72,19 @@ func (n *node) isSymlink() bool {
 // mode is the entry's mode with c4m's null mode replaced by a default:
 // 0644 for files, 0755 for directories, 0777 for symlinks.
 func (n *node) mode() fs.FileMode {
-	m := n.entry.Mode
+	return modeOf(n.entry.Mode, n.dir != nil, n.isSymlink())
+}
+
+// modeOf presents a c4m mode, replacing c4m's null mode (0) with a
+// default and making the type bits agree with what the name is.
+func modeOf(m fs.FileMode, dir, link bool) fs.FileMode {
 	switch {
-	case n.dir != nil:
+	case dir:
 		if m == 0 {
 			return fs.ModeDir | 0o755
 		}
 		return m&^fs.ModeType | fs.ModeDir
-	case n.isSymlink():
+	case link:
 		if m == 0 {
 			return fs.ModeSymlink | 0o777
 		}
@@ -231,12 +244,9 @@ func (v *View) fromChain(ch *chain, hops int) ([]*node, error) {
 		if err != nil {
 			return nil, err
 		}
-		root := &node{dir: &dirState{kids: kids}}
-		root.dir.loaded.Store(true)
-		if err := v.patch(root, raw, ch.rd); err != nil {
+		if kids, err = v.patchKids(kids, raw, ch.rd); err != nil {
 			return nil, err
 		}
-		kids = root.dir.kids
 	}
 	return kids, nil
 }
@@ -253,16 +263,14 @@ func (v *View) fromID(id c4.ID, hops int) ([]*node, error) {
 	return v.fromChain(ch, hops)
 }
 
-// patch applies raw patch entries to a directory with c4m's patch
-// semantics: a new name is added, an entry identical to the current one
-// removes it, and any other entry replaces it, a directory recursing
-// into its children. Only directories a patch passes through are
-// loaded.
-func (v *View) patch(dir *node, raw []*node, rd map[c4.ID]string) error {
-	cur, err := v.kids(dir)
-	if err != nil {
-		return err
-	}
+// patchKids applies raw patch entries to a directory's children with
+// c4m's patch semantics: a new name is added, an entry identical to the
+// current one removes it, and any other entry replaces it, a directory
+// recursing into its children. Only directories a patch passes through
+// are loaded. The patch is persistent: cur and every node below it are
+// left as they were, and the result shares each subtree the patch does
+// not touch.
+func (v *View) patchKids(cur []*node, raw []*node, rd map[c4.ID]string) ([]*node, error) {
 	kids := slices.Clone(cur)
 	gone := make([]bool, len(kids))
 	var added []*node
@@ -301,11 +309,15 @@ func (v *View) patch(dir *node, raw []*node, rd map[c4.ID]string) error {
 			added = append(added, v.present([]*node{p}, rd)...)
 			continue
 		}
-		nb := &node{name: b.name, entry: p.entry, dir: b.dir}
-		if err := v.patch(nb, p.dir.kids, rd); err != nil {
-			return err
+		bk, err := v.kids(b)
+		if err != nil {
+			return nil, err
 		}
-		added = append(added, nb)
+		nk, err := v.patchKids(bk, p.dir.kids, rd)
+		if err != nil {
+			return nil, err
+		}
+		added = append(added, &node{name: b.name, entry: p.entry, dir: loadedDir(nk)})
 	}
 	// Survivors of the base first and the patch's entries after, so that
 	// where names still collide (a sequence member and a plain file) the
@@ -317,9 +329,14 @@ func (v *View) patch(dir *node, raw []*node, rd map[c4.ID]string) error {
 		}
 	}
 	out = append(out, added...)
-	dir.dir.kids = sortUnique(out)
-	dir.dir.loaded.Store(true)
-	return nil
+	return sortUnique(out), nil
+}
+
+// loadedDir returns the state of a directory whose children are known.
+func loadedDir(kids []*node) *dirState {
+	d := &dirState{kids: kids}
+	d.loaded.Store(true)
+	return d
 }
 
 // uniqueRaw drops all but the last of repeated c4m names, as c4m's own
