@@ -20,8 +20,9 @@ const errSharingViolation = syscall.Errno(32)
 // delete access, and a rename (MoveFileEx) holds one on the file it
 // moves until the move returns, after the new name is already visible.
 // A cache or TreeStore object can be found at its name inside that
-// window. Sharing delete access also lets a later rename or removal of
-// the name proceed while this handle is open, as on other systems.
+// window. Sharing delete access also lets the file be moved (a
+// TreeStore splitting its directory) or removed while this handle is
+// open. Windows still refuses a rename that replaces it.
 func openShared(p string) (*os.File, error) {
 	name, err := syscall.UTF16PtrFromString(longPath(p))
 	if err != nil {

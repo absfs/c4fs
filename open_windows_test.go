@@ -12,8 +12,9 @@ import (
 )
 
 // TestOpenSharedAllowsRename checks that a file opened by openShared
-// can be renamed over and removed while open, as on other systems, and
-// that it still reads its original bytes.
+// can be moved and removed while open, as on other systems, and that
+// the handle still reads its bytes. Before openShared, os.Open refused
+// the opposite order: an open while a rename held the file.
 func TestOpenSharedAllowsRename(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "obj")
@@ -25,22 +26,19 @@ func TestOpenSharedAllowsRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	tmp := filepath.Join(dir, ".tmp")
-	if err := os.WriteFile(tmp, []byte("second"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		t.Fatalf("rename over an open object: %v", err)
+	moved := filepath.Join(dir, "moved")
+	if err := os.Rename(p, moved); err != nil {
+		t.Fatalf("move of an open object: %v", err)
 	}
 	if b, err := io.ReadAll(f); err != nil || string(b) != "first" {
 		t.Errorf("open handle reads %q %v", b, err)
 	}
-	g, err := openShared(p)
+	g, err := openShared(moved)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer g.Close()
-	if err := os.Remove(p); err != nil {
+	if err := os.Remove(moved); err != nil {
 		t.Errorf("remove of an open object: %v", err)
 	}
 	if _, err := openShared(filepath.Join(dir, "missing")); !os.IsNotExist(err) {

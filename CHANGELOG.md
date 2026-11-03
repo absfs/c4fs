@@ -69,10 +69,10 @@ implementation is removed.
 - A cached object is not opened until its fill has returned, even once its
   rename has made it visible: on Windows that rename holds the file open,
   and an open inside the window failed with a sharing violation. On Windows
-  local objects are also opened sharing delete access, so a rename or
-  removal of the name by another process neither refuses the open nor is
-  refused by it, and any remaining sharing violation is retried with a
-  bounded backoff. A stress test emulates the Windows window on every OS.
+  local objects are also opened sharing delete access, so a rename moving
+  the file (by another process, say) does not refuse the open, and a move
+  or removal of an open file is not refused by it; any remaining sharing
+  violation is retried with a bounded backoff. A stress test emulates the Windows window on every OS.
 - c4m null modes, times and sizes handled per the standard; `FileInfo.Sys`
   returns the `*c4m.Entry`.
 - Symlinks: `Lstat`, `Readlink`, and following with a 40-link limit.
