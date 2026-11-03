@@ -2,12 +2,16 @@ module github.com/absfs/c4fs
 
 go 1.23.0
 
-toolchain go1.24.7
-
-require github.com/Avalanche-io/c4 v0.8.2-0.20251123060733-2d37ddd07577
+require (
+	github.com/Avalanche-io/c4 v1.0.21
+	github.com/absfs/absfs v1.0.0
+	github.com/absfs/fstesting v1.0.0
+	github.com/absfs/memfs v1.1.0
+	github.com/absfs/switchfs v1.0.0
+	github.com/absfs/unionfs v1.0.0
+)
 
 require (
-	github.com/absfs/absfs v0.9.1 // indirect
-	github.com/absfs/memfs v0.9.1 // indirect
-	github.com/xtgo/set v1.0.0 // indirect
+	github.com/absfs/inode v1.0.0 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
 )
