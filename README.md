@@ -525,23 +525,23 @@ pre-release) is gone. It did not fit absfs: files had no `ReadAt` or
 `Seek`, `Open` returned its own types, listing scanned the whole manifest,
 names were flat paths, and its store layout differed from the 1.0 CLI's.
 
-| v0.9.x                                    | now                                                           |
-| ----------------------------------------- | ------------------------------------------------------------- |
-| `c4fs.New(base, c4fs.NewStoreAdapter(s))` | `c4fs.New(base, s)`, or `c4fs.Open(s, id)`: a `*View`         |
-| `c4fs.NewWithLayer(base, layer, store)`   | `c4fs.NewWorkspace(view, scratch)`                            |
-| tombstones in the layer manifest          | whiteouts in the workspace's in-memory change set             |
-| files hashed into the store as they close | files hashed when `Workspace.Capture` runs                    |
-| `FS.Layer()`                              | `Changeset.Patch`, or `WriteTo`: a c4m patch against the base |
-| `FS.Flatten()`                            | `Changeset.Manifest()`                                        |
-| `FS.ReferencedIDs()`                      | the C4 IDs of `View.Manifest()`                               |
-| `StoreAdapter` over the c4 v0.8.2 store   | any c4 v1 `store.Source`, the CLI's own store included        |
-| `FS.Store()`                              | the `store.Source` you passed in                              |
-| `FS.Base()`                               | `View.Manifest()`, or `Workspace.Base()` for the View          |
-| `FS.WriteFile(name, data, perm)`          | `Workspace.Create` or `OpenFile`, then `Write` and `Close`    |
-| `FS.ReadLink(name)`                       | `Readlink(name)`, on a View or a Workspace                     |
+| v0.9.x                                    | now                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------ |
+| `c4fs.New(base, c4fs.NewStoreAdapter(s))` | `c4fs.New(base, s)`, or `c4fs.Open(s, id)`: a `*View`              |
+| `c4fs.NewWithLayer(base, layer, store)`   | `c4fs.NewWorkspace(view, scratch)`                                 |
+| tombstones in the layer manifest          | whiteouts in the workspace's in-memory change set                  |
+| files hashed into the store as they close | files hashed when `Workspace.Capture` runs                         |
+| `FS.Layer()`                              | `Changeset.Patch`, or `WriteTo`: a c4m patch against the base      |
+| `FS.Flatten()`                            | `Changeset.Manifest()`                                             |
+| `FS.ReferencedIDs()`                      | the C4 IDs of `View.Manifest()`                                    |
+| `StoreAdapter` over the c4 v0.8.2 store   | any c4 v1 `store.Source`, the CLI's own store included             |
+| `FS.Store()`                              | the `store.Source` you passed in                                   |
+| `FS.Base()`                               | `View.Manifest()`, or `Workspace.Base()` for the View              |
+| `FS.WriteFile(name, data, perm)`          | `Workspace.Create` or `OpenFile`, then `Write` and `Close`         |
+| `FS.ReadLink(name)`                       | `Readlink(name)`, on a View or a Workspace                         |
 | `FS.Exists`, `IsDir`, `IsFile`, `Size`    | `Stat(name)`: its error, `IsDir()`, `Mode().IsRegular()`, `Size()` |
-| `FS.Glob(pattern)`                        | `fs.Glob` over `View.Sub("/")` or `Workspace.Sub("/")`          |
-| the `FileSystem` and `File` interfaces    | `absfs.SymlinkFileSystem` and `absfs.File`                     |
+| `FS.Glob(pattern)`                        | `fs.Glob` over `View.Sub("/")` or `Workspace.Sub("/")`             |
+| the `FileSystem` and `File` interfaces    | `absfs.SymlinkFileSystem` and `absfs.File`                         |
 
 Snapshot existing trees with the 1.0 CLI (`c4 id -s`) and open them by the ID
 it prints.
