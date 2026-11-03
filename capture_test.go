@@ -355,18 +355,33 @@ func TestCapturePatchIsMinimal(t *testing.T) {
 func TestCaptureRestored(t *testing.T) {
 	f := newWSFixture(t)
 	w := f.w
-	orig, _ := w.Stat("/src/main.go")
-	dirInfo, _ := w.Stat("/src")
-	w.Remove("/src/main.go")
-	h, _ := w.OpenFile("/src/main.go", os.O_CREATE|os.O_WRONLY, orig.Mode())
-	h.Write([]byte("package main\n"))
-	h.Close()
-	w.Chtimes("/src/main.go", orig.ModTime(), orig.ModTime())
-	w.Chtimes("/src", dirInfo.ModTime(), dirInfo.ModTime())
+	ok := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig, err := w.Stat("/src/main.go")
+	ok(err)
+	dirInfo, err := w.Stat("/src")
+	ok(err)
+	ok(w.Remove("/src/main.go"))
+	wantErr(t, "removed", firstErr(w.Stat("/src/main.go")), fs.ErrNotExist)
+	// Recreated with O_EXCL: the name really was gone.
+	h, err := w.OpenFile("/src/main.go", os.O_CREATE|os.O_EXCL|os.O_WRONLY, orig.Mode())
+	ok(err)
+	_, err = h.Write([]byte("package main\n"))
+	ok(err)
+	ok(h.Close())
+	ok(w.Chtimes("/src/main.go", orig.ModTime(), orig.ModTime()))
+	ok(w.Chtimes("/src", dirInfo.ModTime(), dirInfo.ModTime()))
 	// A metadata change undone.
-	w.Chmod("/README.md", 0o600)
-	w.Chmod("/README.md", 0o644)
+	ok(w.Chmod("/README.md", 0o600))
+	ok(w.Chmod("/README.md", 0o644))
 	cs := capture(t, w, f.st)
+	if cs.Files != 1 {
+		t.Errorf("recreated file not hashed: %d files", cs.Files)
+	}
 	if !cs.Empty() || cs.ID != f.root {
 		t.Errorf("restored tree changed:\n%s", cs.Text())
 	}

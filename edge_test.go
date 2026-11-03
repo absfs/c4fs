@@ -134,7 +134,7 @@ func (s shortReaderAt) Open(c4.ID) (io.ReadCloser, error) {
 		io.Seeker
 		io.Reader
 		io.Closer
-	}{shortAt{s.body}, strings.NewReader(string(s.body)), strings.NewReader(""), io.NopCloser(nil)}, nil
+	}{shortAt(s), strings.NewReader(string(s.body)), strings.NewReader(""), io.NopCloser(nil)}, nil
 }
 
 type shortAt struct{ body []byte }

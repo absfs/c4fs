@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -23,6 +24,10 @@ func TestWorkspaceConcurrent(t *testing.T) {
 	const writers, rounds = 8, 40
 	var wg, others sync.WaitGroup
 	stop := make(chan struct{})
+	// Writers ask for a capture every few rounds. A capture holds the
+	// write lock, so an unthrottled capturer starves the writers on few
+	// CPUs; this keeps the run short whatever GOMAXPROCS is.
+	tick := make(chan struct{}, 1)
 
 	// Every writer writes its own bytes into one View file, at its own
 	// offset: one copy-up, shared.
@@ -58,6 +63,12 @@ func TestWorkspaceConcurrent(t *testing.T) {
 					w.Rename(dir, dir+"x")
 					w.Rename(dir+"x", dir)
 				}
+				if i%4 == 0 {
+					select {
+					case tick <- struct{}{}:
+					default:
+					}
+				}
 			}
 		}(g)
 	}
@@ -79,6 +90,7 @@ func TestWorkspaceConcurrent(t *testing.T) {
 					h.Readdirnames(-1)
 					h.Close()
 				}
+				runtime.Gosched()
 			}
 		}()
 	}
@@ -92,7 +104,7 @@ func TestWorkspaceConcurrent(t *testing.T) {
 			select {
 			case <-stop:
 				return
-			default:
+			case <-tick:
 			}
 			cs, err := w.Capture(f.st)
 			if err != nil {
